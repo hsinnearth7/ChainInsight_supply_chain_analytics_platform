@@ -1,0 +1,1175 @@
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from matplotlib.gridspec import GridSpec
+from matplotlib.patches import Patch
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+
+# scikit-learn
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix,
+                             mean_squared_error, r2_score, silhouette_score)
+
+# ── 演算法 1-10: 監督式學習 ──
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier,
+                               AdaBoostClassifier)
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.naive_bayes import GaussianNB
+
+# ── 演算法 11-15, 26: 非監督式學習 ──
+from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+
+# ── 演算法 21: 類神經網路 (ANN) ──
+from sklearn.neural_network import MLPClassifier
+
+# ── 演算法 27, 28: 異常檢測 ──
+from sklearn.ensemble import IsolationForest
+
+# ── 演算法 30: 基因演算法 (手動實作) ──
+# 不需額外套件，手動實作簡化版
+
+# ============================================================
+# 30 個 AI 演算法 × 供應鏈庫存分析
+# 30 AI Algorithms Applied to Supply Chain Inventory Analysis
+# ============================================================
+
+def load_and_prepare(csv_path):
+    """載入資料並準備特徵"""
+    df = pd.read_csv(csv_path)
+
+    # 衍生欄位
+    df['DSI'] = np.where(df['Daily_Demand_Est'] > 0,
+                         df['Current_Stock'] / df['Daily_Demand_Est'], 999)
+    df['Stock_Coverage_Ratio'] = np.where(
+        df['Safety_Stock_Target'] > 0,
+        df['Current_Stock'] / df['Safety_Stock_Target'], 0)
+    df['Demand_Intensity'] = df['Daily_Demand_Est'] * df['Unit_Cost']
+
+    # 編碼
+    le_cat = LabelEncoder()
+    df['Category_Enc'] = le_cat.fit_transform(df['Category'])
+    le_vendor = LabelEncoder()
+    df['Vendor_Enc'] = le_vendor.fit_transform(df['Vendor_Name'])
+    le_status = LabelEncoder()
+    df['Stock_Status_Enc'] = le_status.fit_transform(df['Stock_Status'])
+
+    # 特徵欄位
+    feature_cols = ['Unit_Cost', 'Current_Stock', 'Daily_Demand_Est',
+                    'Safety_Stock_Target', 'Lead_Time_Days', 'Reorder_Point',
+                    'Category_Enc', 'Vendor_Enc']
+
+    # 移除 NaN 行
+    clean = df.dropna(subset=feature_cols + ['Stock_Status_Enc', 'Inventory_Value']).copy()
+
+    X = clean[feature_cols].values
+    y_class = clean['Stock_Status_Enc'].values  # 分類目標: Stock_Status
+    y_reg = clean['Inventory_Value'].values       # 迴歸目標: Inventory_Value
+
+    return df, clean, X, y_class, y_reg, feature_cols, le_status
+
+
+# ================================================================
+# Part 1: 監督式學習 — 分類比較 (演算法 2-10, 21)
+# Supervised Learning — Classification Comparison
+# ================================================================
+def run_classification(X, y, le_status):
+    """執行 10 種分類演算法並比較"""
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.2, random_state=42, stratify=y)
+
+    classifiers = {
+        '#2 Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
+        '#3 Decision Tree': DecisionTreeClassifier(max_depth=10, random_state=42),
+        '#4 Random Forest': RandomForestClassifier(n_estimators=100, random_state=42),
+        '#5 SVM': SVC(kernel='rbf', probability=True, random_state=42),
+        '#6 k-NN': KNeighborsClassifier(n_neighbors=7),
+        '#7 Naive Bayes': GaussianNB(),
+        '#8 Gradient Boosting': GradientBoostingClassifier(n_estimators=100, random_state=42),
+        '#9 AdaBoost': AdaBoostClassifier(n_estimators=100, random_state=42),
+        '#21 ANN (MLP)': MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=300,
+                                       random_state=42, early_stopping=True),
+    }
+
+    # 嘗試加入 XGBoost
+    try:
+        from xgboost import XGBClassifier
+        classifiers['#10 XGBoost'] = XGBClassifier(
+            n_estimators=100, use_label_encoder=False,
+            eval_metric='mlogloss', random_state=42, verbosity=0)
+    except ImportError:
+        print('  ⚠ XGBoost 未安裝，跳過 #10')
+
+    results = {}
+    trained_models = {}
+    for name, clf in classifiers.items():
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
+        acc = accuracy_score(y_test, y_pred)
+        # 5-fold CV
+        cv_scores = cross_val_score(clf, X_scaled, y, cv=5, scoring='accuracy')
+        results[name] = {
+            'accuracy': acc,
+            'cv_mean': cv_scores.mean(),
+            'cv_std': cv_scores.std(),
+            'y_pred': y_pred,
+        }
+        trained_models[name] = clf
+        print(f'  ✓ {name}: Acc={acc:.4f}, CV={cv_scores.mean():.4f}±{cv_scores.std():.4f}')
+
+    return results, trained_models, X_train, X_test, y_train, y_test, scaler
+
+
+def plot_classification_comparison(results, y_test, le_status,
+                                   save_path='chart_15_classification_comparison.png'):
+    """圖表 15: 分類演算法比較"""
+    fig = plt.figure(figsize=(24, 16), facecolor='#F0F2F6')
+    fig.suptitle('Supervised Learning — Classification of Stock Status (10 Algorithms)',
+                 fontsize=18, fontweight='bold', y=0.98, color='#1B2A4A')
+    gs = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.30,
+                  left=0.06, right=0.96, top=0.92, bottom=0.06)
+
+    names = list(results.keys())
+    accs = [results[n]['accuracy'] for n in names]
+    cv_means = [results[n]['cv_mean'] for n in names]
+    cv_stds = [results[n]['cv_std'] for n in names]
+
+    # 排序
+    sorted_idx = np.argsort(accs)[::-1]
+    names_sorted = [names[i] for i in sorted_idx]
+    accs_sorted = [accs[i] for i in sorted_idx]
+    cv_sorted = [cv_means[i] for i in sorted_idx]
+    cv_std_sorted = [cv_stds[i] for i in sorted_idx]
+
+    # (1) 準確率長條圖
+    ax1 = fig.add_subplot(gs[0, 0])
+    colors_bar = plt.cm.RdYlGn(np.linspace(0.3, 0.9, len(names_sorted)))
+    bars = ax1.barh(range(len(names_sorted)), accs_sorted,
+                    color=colors_bar[::-1], edgecolor='white')
+    ax1.set_yticks(range(len(names_sorted)))
+    ax1.set_yticklabels(names_sorted, fontsize=8)
+    for bar, acc in zip(bars, accs_sorted):
+        ax1.text(bar.get_width() + 0.002, bar.get_y() + bar.get_height() / 2,
+                 f'{acc:.4f}', va='center', fontsize=8, fontweight='bold')
+    ax1.set_xlabel('Test Accuracy')
+    ax1.set_title('Test Accuracy Ranking', fontsize=13, fontweight='bold')
+    ax1.set_xlim(min(accs_sorted) - 0.05, 1.0)
+    ax1.invert_yaxis()
+
+    # (2) CV 分數 + 誤差棒
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax2.barh(range(len(names_sorted)), cv_sorted,
+             xerr=cv_std_sorted, color='#3498DB', alpha=0.7,
+             edgecolor='white', capsize=3)
+    ax2.set_yticks(range(len(names_sorted)))
+    ax2.set_yticklabels(names_sorted, fontsize=8)
+    for i, (cv, std) in enumerate(zip(cv_sorted, cv_std_sorted)):
+        ax2.text(cv + std + 0.005, i, f'{cv:.4f}±{std:.4f}',
+                 va='center', fontsize=7, fontweight='bold')
+    ax2.set_xlabel('5-Fold CV Accuracy')
+    ax2.set_title('Cross-Validation Scores', fontsize=13, fontweight='bold')
+    ax2.set_xlim(min(cv_sorted) - 0.05, 1.0)
+    ax2.invert_yaxis()
+
+    # (3) Test vs CV 散佈圖
+    ax3 = fig.add_subplot(gs[0, 2])
+    for i, name in enumerate(names):
+        ax3.scatter(results[name]['accuracy'], results[name]['cv_mean'],
+                    s=100, zorder=5, edgecolors='#1B2A4A', linewidth=1)
+        ax3.annotate(name.split(' ', 1)[0], (results[name]['accuracy'], results[name]['cv_mean']),
+                     fontsize=7, ha='center', va='bottom', xytext=(0, 6),
+                     textcoords='offset points')
+    lims = [min(min(accs), min(cv_means)) - 0.02, max(max(accs), max(cv_means)) + 0.02]
+    ax3.plot(lims, lims, 'r--', lw=1, alpha=0.5, label='y=x (no overfit)')
+    ax3.set_xlabel('Test Accuracy')
+    ax3.set_ylabel('CV Accuracy')
+    ax3.set_title('Overfitting Check: Test vs CV', fontsize=13, fontweight='bold')
+    ax3.legend(fontsize=8)
+
+    # (4-6) Top 3 混淆矩陣
+    class_names = le_status.classes_
+    top3 = names_sorted[:3]
+    for idx, name in enumerate(top3):
+        ax = fig.add_subplot(gs[1, idx])
+        cm = confusion_matrix(y_test, results[name]['y_pred'])
+        cm_pct = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax,
+                    xticklabels=class_names, yticklabels=class_names,
+                    linewidths=0.5, cbar_kws={'shrink': 0.7})
+        # 加上百分比
+        for i in range(len(class_names)):
+            for j in range(len(class_names)):
+                ax.text(j + 0.5, i + 0.72, f'({cm_pct[i, j]:.1f}%)',
+                        ha='center', va='center', fontsize=7, color='gray')
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('Actual')
+        acc = results[name]['accuracy']
+        ax.set_title(f'{name}\nAccuracy: {acc:.4f}', fontsize=11, fontweight='bold')
+
+    plt.savefig(save_path, dpi=150, facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  ✅ {save_path}')
+
+
+# ================================================================
+# Part 2: 特徵重要性分析 (Random Forest + Gradient Boosting)
+# Feature Importance Analysis
+# ================================================================
+def plot_feature_importance(trained_models, feature_cols, X_scaled, y,
+                            save_path='chart_16_feature_importance.png'):
+    """圖表 16: 特徵重要性"""
+    fig, axes = plt.subplots(2, 2, figsize=(22, 14), facecolor='#F0F2F6')
+    fig.suptitle('Feature Importance — Which Factors Drive Stock Status?',
+                 fontsize=18, fontweight='bold', y=1.0, color='#1B2A4A')
+
+    labels = ['Unit Cost', 'Curr. Stock', 'Daily Demand', 'Safety Stock',
+              'Lead Time', 'Reorder Pt', 'Category', 'Vendor']
+
+    importance_models = [
+        ('#4 Random Forest', 'feature_importances_', '#27AE60'),
+        ('#8 Gradient Boosting', 'feature_importances_', '#E74C3C'),
+        ('#3 Decision Tree', 'feature_importances_', '#3498DB'),
+    ]
+
+    for idx, (name, attr, color) in enumerate(importance_models):
+        if name not in trained_models:
+            continue
+        ax = axes[idx // 2, idx % 2]
+        model = trained_models[name]
+        imp = getattr(model, attr)
+        sorted_idx = np.argsort(imp)
+        ax.barh([labels[i] for i in sorted_idx], imp[sorted_idx],
+                color=color, alpha=0.8, edgecolor='white')
+        for i, v in enumerate(imp[sorted_idx]):
+            ax.text(v + 0.005, i, f'{v:.4f}', va='center', fontsize=8, fontweight='bold')
+        ax.set_xlabel('Importance')
+        ax.set_title(f'{name} — Feature Importance', fontsize=12, fontweight='bold')
+
+    # (4) Logistic Regression 係數 (絕對值)
+    ax4 = axes[1, 1]
+    if '#2 Logistic Regression' in trained_models:
+        lr = trained_models['#2 Logistic Regression']
+        coef_abs = np.abs(lr.coef_).mean(axis=0)  # 多類別取平均
+        sorted_idx = np.argsort(coef_abs)
+        ax4.barh([labels[i] for i in sorted_idx], coef_abs[sorted_idx],
+                 color='#8E44AD', alpha=0.8, edgecolor='white')
+        for i, v in enumerate(coef_abs[sorted_idx]):
+            ax4.text(v + 0.01, i, f'{v:.4f}', va='center', fontsize=8, fontweight='bold')
+        ax4.set_xlabel('|Coefficient| (avg across classes)')
+        ax4.set_title('#2 Logistic Regression — Coefficient Magnitude', fontsize=12, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  ✅ {save_path}')
+
+
+# ================================================================
+# Part 3: 迴歸分析 (演算法 #1 Linear Regression + 樹模型)
+# Regression — Predict Inventory Value
+# ================================================================
+def plot_regression_analysis(X, y_reg, feature_cols,
+                             save_path='chart_17_regression_prediction.png'):
+    """圖表 17: 迴歸預測"""
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y_reg, test_size=0.2, random_state=42)
+
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+
+    regressors = {
+        '#1 Linear Regression': LinearRegression(),
+        '#4 Random Forest Reg.': RandomForestRegressor(n_estimators=100, random_state=42),
+        '#8 Gradient Boosting Reg.': GradientBoostingRegressor(n_estimators=100, random_state=42),
+    }
+
+    fig = plt.figure(figsize=(24, 14), facecolor='#F0F2F6')
+    fig.suptitle('Regression Analysis — Predicting Inventory Value (#1 Linear Regression + Ensemble)',
+                 fontsize=18, fontweight='bold', y=0.98, color='#1B2A4A')
+    gs = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.30,
+                  left=0.06, right=0.96, top=0.92, bottom=0.06)
+
+    colors = ['#2E86C1', '#27AE60', '#E74C3C']
+    reg_results = {}
+
+    for idx, (name, reg) in enumerate(regressors.items()):
+        reg.fit(X_train, y_train)
+        y_pred = reg.predict(X_test)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+        r2 = r2_score(y_test, y_pred)
+        reg_results[name] = {'rmse': rmse, 'r2': r2, 'y_pred': y_pred}
+
+        # 實際 vs 預測散佈圖
+        ax = fig.add_subplot(gs[0, idx])
+        sample_idx = np.random.RandomState(42).choice(len(y_test), min(2000, len(y_test)), replace=False)
+        ax.scatter(y_test[sample_idx], y_pred[sample_idx],
+                   s=5, alpha=0.3, color=colors[idx], edgecolors='none')
+        lims = [0, max(y_test.max(), y_pred.max())]
+        ax.plot(lims, lims, 'r--', lw=1.5, label='Perfect Prediction')
+        ax.set_xlabel('Actual Inventory Value ($)')
+        ax.set_ylabel('Predicted Inventory Value ($)')
+        ax.set_title(f'{name}\nR²={r2:.4f}, RMSE=${rmse:,.0f}', fontsize=11, fontweight='bold')
+        ax.legend(fontsize=8)
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x/1e6:.1f}M'))
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x/1e6:.1f}M'))
+
+    # (4) 模型比較長條圖
+    ax4 = fig.add_subplot(gs[1, 0])
+    r2_vals = [reg_results[n]['r2'] for n in reg_results]
+    bars = ax4.barh(list(reg_results.keys()), r2_vals,
+                    color=colors, alpha=0.8, edgecolor='white')
+    for bar, r2 in zip(bars, r2_vals):
+        ax4.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height() / 2,
+                 f'{r2:.4f}', va='center', fontsize=10, fontweight='bold')
+    ax4.set_xlabel('R² Score')
+    ax4.set_title('Model Comparison — R²', fontsize=12, fontweight='bold')
+    ax4.invert_yaxis()
+
+    # (5) RMSE 比較
+    ax5 = fig.add_subplot(gs[1, 1])
+    rmse_vals = [reg_results[n]['rmse'] for n in reg_results]
+    bars = ax5.barh(list(reg_results.keys()), rmse_vals,
+                    color=colors, alpha=0.8, edgecolor='white')
+    for bar, rmse in zip(bars, rmse_vals):
+        ax5.text(bar.get_width() + max(rmse_vals) * 0.02,
+                 bar.get_y() + bar.get_height() / 2,
+                 f'${rmse:,.0f}', va='center', fontsize=10, fontweight='bold')
+    ax5.set_xlabel('RMSE ($)')
+    ax5.set_title('Model Comparison — RMSE (lower is better)', fontsize=12, fontweight='bold')
+    ax5.invert_yaxis()
+
+    # (6) 殘差分佈 — 最佳模型
+    ax6 = fig.add_subplot(gs[1, 2])
+    best_name = max(reg_results, key=lambda n: reg_results[n]['r2'])
+    residuals = y_test - reg_results[best_name]['y_pred']
+    ax6.hist(residuals, bins=60, density=True, alpha=0.6, color='#8E44AD', edgecolor='white')
+    from scipy import stats as sp_stats
+    kde_x = np.linspace(residuals.min(), residuals.max(), 300)
+    kde = sp_stats.gaussian_kde(residuals)
+    ax6.plot(kde_x, kde(kde_x), color='#1B2A4A', lw=2)
+    ax6.axvline(0, color='red', ls='--', lw=1.5)
+    ax6.set_xlabel('Residual ($)')
+    ax6.set_ylabel('Density')
+    ax6.set_title(f'Residual Distribution — {best_name}', fontsize=12, fontweight='bold')
+    ax6.text(0.97, 0.95,
+             f'Mean: ${residuals.mean():,.0f}\nStd: ${residuals.std():,.0f}\n'
+             f'Skew: {pd.Series(residuals).skew():.2f}',
+             transform=ax6.transAxes, fontsize=9, va='top', ha='right',
+             family='monospace', bbox=dict(boxstyle='round', fc='white', ec='#8E44AD'))
+
+    plt.savefig(save_path, dpi=150, facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  ✅ {save_path}')
+
+
+# ================================================================
+# Part 4: 非監督式學習 — 分群 (演算法 #11 k-Means, #12 Hierarchical, #13 DBSCAN, #26 k-Means++)
+# Unsupervised Learning — Clustering
+# ================================================================
+def plot_clustering_analysis(X, clean_df, feature_cols,
+                             save_path='chart_18_clustering_analysis.png'):
+    """圖表 18: 分群分析"""
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # PCA 降到 2D 用於視覺化
+    pca_2d = PCA(n_components=2)
+    X_2d = pca_2d.fit_transform(X_scaled)
+
+    fig = plt.figure(figsize=(24, 16), facecolor='#F0F2F6')
+    fig.suptitle('Unsupervised Learning — Clustering Analysis (#11 k-Means, #12 Hierarchical, #13 DBSCAN, #26 k-Means++)',
+                 fontsize=16, fontweight='bold', y=0.98, color='#1B2A4A')
+    gs = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.28,
+                  left=0.06, right=0.96, top=0.92, bottom=0.06)
+
+    # (1) Elbow Method 決定 k
+    ax1 = fig.add_subplot(gs[0, 0])
+    inertias = []
+    sil_scores = []
+    K_range = range(2, 11)
+    for k in K_range:
+        km = KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42)
+        km.fit(X_scaled)
+        inertias.append(km.inertia_)
+        sil_scores.append(silhouette_score(X_scaled, km.labels_, sample_size=3000))
+
+    ax1.plot(K_range, inertias, 'bo-', lw=2, label='Inertia (SSE)')
+    ax1.set_xlabel('Number of Clusters (k)')
+    ax1.set_ylabel('Inertia', color='#2E86C1')
+    ax1.tick_params(axis='y', labelcolor='#2E86C1')
+
+    ax1b = ax1.twinx()
+    ax1b.plot(K_range, sil_scores, 'r^--', lw=2, label='Silhouette Score')
+    ax1b.set_ylabel('Silhouette Score', color='#E74C3C')
+    ax1b.tick_params(axis='y', labelcolor='#E74C3C')
+
+    best_k = K_range[np.argmax(sil_scores)]
+    ax1.axvline(best_k, color='gray', ls=':', lw=1.5)
+    ax1.set_title(f'Elbow Method + Silhouette (Best k={best_k})', fontsize=12, fontweight='bold')
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1b.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc='center right')
+
+    # (2) k-Means++ (#26) 分群結果
+    ax2 = fig.add_subplot(gs[0, 1])
+    km_best = KMeans(n_clusters=best_k, init='k-means++', n_init=10, random_state=42)
+    km_labels = km_best.fit_predict(X_scaled)
+    scatter = ax2.scatter(X_2d[:, 0], X_2d[:, 1], c=km_labels, cmap='Set2',
+                          s=5, alpha=0.4, edgecolors='none')
+    # 繪製中心點
+    centers_2d = pca_2d.transform(km_best.cluster_centers_)
+    ax2.scatter(centers_2d[:, 0], centers_2d[:, 1], c='red', marker='X',
+                s=200, edgecolors='black', linewidth=2, zorder=10, label='Centroids')
+    ax2.set_xlabel(f'PC1 ({pca_2d.explained_variance_ratio_[0]*100:.1f}%)')
+    ax2.set_ylabel(f'PC2 ({pca_2d.explained_variance_ratio_[1]*100:.1f}%)')
+    sil_km = silhouette_score(X_scaled, km_labels, sample_size=3000)
+    ax2.set_title(f'#26 k-Means++ (k={best_k}) — Silhouette={sil_km:.3f}',
+                  fontsize=11, fontweight='bold')
+    ax2.legend(fontsize=8)
+
+    # (3) Hierarchical Clustering (#12)
+    ax3 = fig.add_subplot(gs[0, 2])
+    hc = AgglomerativeClustering(n_clusters=best_k)
+    hc_labels = hc.fit_predict(X_scaled)
+    ax3.scatter(X_2d[:, 0], X_2d[:, 1], c=hc_labels, cmap='Set2',
+                s=5, alpha=0.4, edgecolors='none')
+    sil_hc = silhouette_score(X_scaled, hc_labels, sample_size=3000)
+    ax3.set_xlabel(f'PC1 ({pca_2d.explained_variance_ratio_[0]*100:.1f}%)')
+    ax3.set_ylabel(f'PC2 ({pca_2d.explained_variance_ratio_[1]*100:.1f}%)')
+    ax3.set_title(f'#12 Hierarchical (k={best_k}) — Silhouette={sil_hc:.3f}',
+                  fontsize=11, fontweight='bold')
+
+    # (4) DBSCAN (#13)
+    ax4 = fig.add_subplot(gs[1, 0])
+    db = DBSCAN(eps=2.5, min_samples=10)
+    db_labels = db.fit_predict(X_scaled)
+    n_clusters_db = len(set(db_labels)) - (1 if -1 in db_labels else 0)
+    n_noise = (db_labels == -1).sum()
+
+    noise_mask = db_labels == -1
+    ax4.scatter(X_2d[~noise_mask, 0], X_2d[~noise_mask, 1],
+                c=db_labels[~noise_mask], cmap='Set2', s=5, alpha=0.4, edgecolors='none')
+    ax4.scatter(X_2d[noise_mask, 0], X_2d[noise_mask, 1],
+                c='red', s=8, alpha=0.6, marker='x', label=f'Noise ({n_noise:,})')
+    ax4.set_xlabel(f'PC1')
+    ax4.set_ylabel(f'PC2')
+    ax4.set_title(f'#13 DBSCAN — {n_clusters_db} clusters, {n_noise:,} noise points',
+                  fontsize=11, fontweight='bold')
+    ax4.legend(fontsize=8)
+
+    # (5) 分群 vs 實際 Stock_Status 對比
+    ax5 = fig.add_subplot(gs[1, 1])
+    ct = pd.crosstab(
+        pd.Series(km_labels, name='Cluster'),
+        clean_df['Stock_Status'].values,
+        normalize='index'
+    ) * 100
+    ct = ct[['Normal Stock', 'Low Stock', 'Out of Stock']]
+    ct.plot(kind='bar', stacked=True, ax=ax5,
+            color=['#27AE60', '#F39C12', '#E74C3C'], edgecolor='white')
+    ax5.set_xlabel('k-Means++ Cluster')
+    ax5.set_ylabel('% of Stock Status')
+    ax5.set_title('k-Means++ Clusters vs Actual Stock Status', fontsize=11, fontweight='bold')
+    ax5.legend(fontsize=8)
+    ax5.tick_params(axis='x', rotation=0)
+
+    # (6) 分群特徵雷達 (每個 cluster 的平均特徵)
+    ax6 = fig.add_subplot(gs[1, 2])
+    cluster_profiles = pd.DataFrame(X_scaled, columns=feature_cols)
+    cluster_profiles['Cluster'] = km_labels
+    profile_mean = cluster_profiles.groupby('Cluster').mean()
+
+    short_labels = ['Cost', 'Stock', 'Demand', 'Safety', 'LeadT', 'ReorderP', 'Cat', 'Vendor']
+    x_pos = np.arange(len(short_labels))
+    width = 0.8 / best_k
+    cluster_colors = sns.color_palette('Set2', best_k)
+    for i in range(best_k):
+        ax6.bar(x_pos + i * width, profile_mean.iloc[i].values, width,
+                label=f'Cluster {i}', color=cluster_colors[i], edgecolor='white')
+    ax6.set_xticks(x_pos + width * (best_k - 1) / 2)
+    ax6.set_xticklabels(short_labels, fontsize=8, rotation=30, ha='right')
+    ax6.set_ylabel('Standardized Mean')
+    ax6.set_title('Cluster Feature Profiles (Standardized)', fontsize=11, fontweight='bold')
+    ax6.legend(fontsize=7, loc='upper right')
+    ax6.axhline(0, color='gray', ls='--', lw=0.5)
+
+    plt.savefig(save_path, dpi=150, facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  ✅ {save_path}')
+
+    return km_labels
+
+
+# ================================================================
+# Part 5: 降維可視化 (演算法 #14 PCA, #15 t-SNE)
+# Dimensionality Reduction Visualization
+# ================================================================
+def plot_dimensionality_reduction(X, clean_df, le_status,
+                                  save_path='chart_19_pca_tsne.png'):
+    """圖表 19: PCA + t-SNE"""
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    fig = plt.figure(figsize=(24, 14), facecolor='#F0F2F6')
+    fig.suptitle('Dimensionality Reduction — #14 PCA & #15 t-SNE Visualization',
+                 fontsize=18, fontweight='bold', y=0.98, color='#1B2A4A')
+    gs = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.28,
+                  left=0.06, right=0.96, top=0.92, bottom=0.06)
+
+    status_colors = {'Normal Stock': '#27AE60', 'Low Stock': '#F39C12', 'Out of Stock': '#E74C3C'}
+    statuses = clean_df['Stock_Status'].values
+
+    # (1) PCA — 解釋變異比例
+    ax1 = fig.add_subplot(gs[0, 0])
+    pca_full = PCA()
+    pca_full.fit(X_scaled)
+    cum_var = np.cumsum(pca_full.explained_variance_ratio_) * 100
+    ax1.bar(range(1, len(cum_var) + 1), pca_full.explained_variance_ratio_ * 100,
+            alpha=0.6, color='#3498DB', label='Individual')
+    ax1.plot(range(1, len(cum_var) + 1), cum_var, 'ro-', lw=2, label='Cumulative')
+    ax1.axhline(90, color='gray', ls='--', lw=1, alpha=0.5)
+    ax1.text(len(cum_var) - 0.5, 91, '90% threshold', fontsize=8, color='gray')
+    n_90 = np.argmax(cum_var >= 90) + 1
+    ax1.axvline(n_90, color='#E74C3C', ls=':', lw=1.5)
+    ax1.set_xlabel('Principal Component')
+    ax1.set_ylabel('Explained Variance (%)')
+    ax1.set_title(f'PCA Explained Variance ({n_90} PCs for 90%)', fontsize=12, fontweight='bold')
+    ax1.legend(fontsize=8)
+
+    # (2) PCA 2D — by Stock_Status
+    ax2 = fig.add_subplot(gs[0, 1])
+    pca_2d = PCA(n_components=2)
+    X_pca = pca_2d.fit_transform(X_scaled)
+    for status, color in status_colors.items():
+        mask = statuses == status
+        ax2.scatter(X_pca[mask, 0], X_pca[mask, 1], s=5, alpha=0.3,
+                    color=color, label=status, edgecolors='none')
+    ax2.set_xlabel(f'PC1 ({pca_2d.explained_variance_ratio_[0]*100:.1f}%)')
+    ax2.set_ylabel(f'PC2 ({pca_2d.explained_variance_ratio_[1]*100:.1f}%)')
+    ax2.set_title('#14 PCA 2D — Stock Status', fontsize=12, fontweight='bold')
+    ax2.legend(fontsize=8, markerscale=3)
+
+    # (3) PCA 2D — by Category
+    ax3 = fig.add_subplot(gs[0, 2])
+    categories = clean_df['Category'].values
+    cat_unique = sorted(clean_df['Category'].unique())
+    cat_palette = sns.color_palette('Set2', len(cat_unique))
+    for i, cat in enumerate(cat_unique):
+        mask = categories == cat
+        ax3.scatter(X_pca[mask, 0], X_pca[mask, 1], s=5, alpha=0.3,
+                    color=cat_palette[i], label=cat, edgecolors='none')
+    ax3.set_xlabel(f'PC1 ({pca_2d.explained_variance_ratio_[0]*100:.1f}%)')
+    ax3.set_ylabel(f'PC2 ({pca_2d.explained_variance_ratio_[1]*100:.1f}%)')
+    ax3.set_title('#14 PCA 2D — Category', fontsize=12, fontweight='bold')
+    ax3.legend(fontsize=7, markerscale=3, ncol=2)
+
+    # (4) t-SNE 2D — by Stock_Status (使用子樣本加速)
+    ax4 = fig.add_subplot(gs[1, 0])
+    sample_size = min(5000, len(X_scaled))
+    idx_sample = np.random.RandomState(42).choice(len(X_scaled), sample_size, replace=False)
+    X_sample = X_scaled[idx_sample]
+    status_sample = statuses[idx_sample]
+    cat_sample = categories[idx_sample]
+
+    print('  ⏳ Running t-SNE (n=5000)...')
+    tsne = TSNE(n_components=2, random_state=42, perplexity=30, max_iter=1000)
+    X_tsne = tsne.fit_transform(X_sample)
+
+    for status, color in status_colors.items():
+        mask = status_sample == status
+        ax4.scatter(X_tsne[mask, 0], X_tsne[mask, 1], s=5, alpha=0.4,
+                    color=color, label=status, edgecolors='none')
+    ax4.set_xlabel('t-SNE 1')
+    ax4.set_ylabel('t-SNE 2')
+    ax4.set_title(f'#15 t-SNE 2D — Stock Status (n={sample_size:,})', fontsize=12, fontweight='bold')
+    ax4.legend(fontsize=8, markerscale=3)
+
+    # (5) t-SNE 2D — by Category
+    ax5 = fig.add_subplot(gs[1, 1])
+    for i, cat in enumerate(cat_unique):
+        mask = cat_sample == cat
+        ax5.scatter(X_tsne[mask, 0], X_tsne[mask, 1], s=5, alpha=0.4,
+                    color=cat_palette[i], label=cat, edgecolors='none')
+    ax5.set_xlabel('t-SNE 1')
+    ax5.set_ylabel('t-SNE 2')
+    ax5.set_title(f'#15 t-SNE 2D — Category', fontsize=12, fontweight='bold')
+    ax5.legend(fontsize=7, markerscale=3, ncol=2)
+
+    # (6) PCA Loading Plot — 特徵在 PC1/PC2 上的投影
+    ax6 = fig.add_subplot(gs[1, 2])
+    loadings = pca_2d.components_.T
+    feature_labels = ['Cost', 'Stock', 'Demand', 'Safety', 'Lead', 'Reorder', 'Cat', 'Vendor']
+    for i, (x, y) in enumerate(loadings):
+        ax6.arrow(0, 0, x * 3, y * 3, head_width=0.08, head_length=0.04,
+                  fc='#E74C3C', ec='#E74C3C', alpha=0.7)
+        ax6.text(x * 3.3, y * 3.3, feature_labels[i], fontsize=9, fontweight='bold',
+                 ha='center', va='center')
+    circle = plt.Circle((0, 0), 1, fill=False, color='gray', ls='--', lw=1)
+    ax6.add_patch(circle)
+    ax6.set_xlim(-4, 4)
+    ax6.set_ylim(-4, 4)
+    ax6.axhline(0, color='gray', lw=0.5)
+    ax6.axvline(0, color='gray', lw=0.5)
+    ax6.set_xlabel('PC1 Loading')
+    ax6.set_ylabel('PC2 Loading')
+    ax6.set_title('PCA Loading Plot — Feature Contributions', fontsize=12, fontweight='bold')
+    ax6.set_aspect('equal')
+
+    plt.savefig(save_path, dpi=150, facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  ✅ {save_path}')
+
+
+# ================================================================
+# Part 6: 異常檢測 (演算法 #28 Isolation Forest, #27 Autoencoder 簡化版)
+# Anomaly Detection
+# ================================================================
+def plot_anomaly_detection(X, clean_df, feature_cols,
+                           save_path='chart_20_anomaly_detection.png'):
+    """圖表 20: 異常檢測"""
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    fig = plt.figure(figsize=(24, 14), facecolor='#F0F2F6')
+    fig.suptitle('Anomaly Detection — #28 Isolation Forest & #27 Autoencoder (MLP-based)',
+                 fontsize=18, fontweight='bold', y=0.98, color='#1B2A4A')
+    gs = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.30,
+                  left=0.06, right=0.96, top=0.92, bottom=0.06)
+
+    # ── Isolation Forest (#28) ──
+    iso = IsolationForest(contamination=0.05, random_state=42, n_estimators=200)
+    iso_labels = iso.fit_predict(X_scaled)  # 1=normal, -1=anomaly
+    iso_anomaly = iso_labels == -1
+    iso_scores = iso.score_samples(X_scaled)
+
+    # PCA 2D
+    pca_2d = PCA(n_components=2)
+    X_2d = pca_2d.fit_transform(X_scaled)
+
+    # (1) Isolation Forest — 散佈圖
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax1.scatter(X_2d[~iso_anomaly, 0], X_2d[~iso_anomaly, 1],
+                s=3, alpha=0.2, color='#3498DB', label=f'Normal ({(~iso_anomaly).sum():,})')
+    ax1.scatter(X_2d[iso_anomaly, 0], X_2d[iso_anomaly, 1],
+                s=15, alpha=0.7, color='#E74C3C', marker='x',
+                label=f'Anomaly ({iso_anomaly.sum():,})')
+    ax1.set_xlabel('PC1')
+    ax1.set_ylabel('PC2')
+    ax1.set_title(f'#28 Isolation Forest — {iso_anomaly.sum():,} anomalies detected',
+                  fontsize=11, fontweight='bold')
+    ax1.legend(fontsize=8)
+
+    # (2) Anomaly Score 分佈
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax2.hist(iso_scores[~iso_anomaly], bins=60, alpha=0.6, color='#3498DB',
+             density=True, label='Normal')
+    ax2.hist(iso_scores[iso_anomaly], bins=30, alpha=0.6, color='#E74C3C',
+             density=True, label='Anomaly')
+    ax2.axvline(np.percentile(iso_scores, 5), color='red', ls='--', lw=1.5,
+                label='5% threshold')
+    ax2.set_xlabel('Anomaly Score (lower = more anomalous)')
+    ax2.set_ylabel('Density')
+    ax2.set_title('Isolation Forest — Score Distribution', fontsize=12, fontweight='bold')
+    ax2.legend(fontsize=8)
+
+    # (3) 異常 vs 正常的特徵比較
+    ax3 = fig.add_subplot(gs[0, 2])
+    df_feat = pd.DataFrame(X, columns=feature_cols)
+    df_feat['Anomaly'] = iso_anomaly
+    short_labels = ['Cost', 'Stock', 'Demand', 'Safety', 'Lead', 'Reorder', 'Cat', 'Vendor']
+
+    normal_means = df_feat[~df_feat['Anomaly']][feature_cols].mean()
+    anomaly_means = df_feat[df_feat['Anomaly']][feature_cols].mean()
+    ratio = anomaly_means / normal_means.replace(0, 1)
+
+    sorted_idx = np.argsort(np.abs(ratio.values - 1))[::-1]
+    y_pos = range(len(short_labels))
+    bars = ax3.barh([short_labels[i] for i in sorted_idx],
+                    [ratio.values[i] for i in sorted_idx],
+                    color=['#E74C3C' if abs(ratio.values[i] - 1) > 0.3 else '#3498DB'
+                           for i in sorted_idx],
+                    alpha=0.8, edgecolor='white')
+    ax3.axvline(1.0, color='gray', ls='--', lw=1.5)
+    for bar, r in zip(bars, [ratio.values[i] for i in sorted_idx]):
+        ax3.text(bar.get_width() + 0.02, bar.get_y() + bar.get_height() / 2,
+                 f'{r:.2f}x', va='center', fontsize=8, fontweight='bold')
+    ax3.set_xlabel('Anomaly / Normal Ratio (1.0 = same)')
+    ax3.set_title('Feature Comparison: Anomaly vs Normal', fontsize=12, fontweight='bold')
+    ax3.invert_yaxis()
+
+    # ── Autoencoder (#27) — 使用 MLPRegressor 模擬 ──
+    from sklearn.neural_network import MLPRegressor
+
+    # 訓練自動編碼器 (輸入=輸出)
+    ae = MLPRegressor(hidden_layer_sizes=(32, 8, 32), max_iter=200,
+                      random_state=42, early_stopping=True, activation='relu')
+    ae.fit(X_scaled, X_scaled)
+    X_reconstructed = ae.predict(X_scaled)
+    reconstruction_error = np.mean((X_scaled - X_reconstructed) ** 2, axis=1)
+
+    # 以 95th percentile 為閾值
+    threshold_ae = np.percentile(reconstruction_error, 95)
+    ae_anomaly = reconstruction_error > threshold_ae
+
+    # (4) Autoencoder 散佈圖
+    ax4 = fig.add_subplot(gs[1, 0])
+    ax4.scatter(X_2d[~ae_anomaly, 0], X_2d[~ae_anomaly, 1],
+                s=3, alpha=0.2, color='#27AE60', label=f'Normal ({(~ae_anomaly).sum():,})')
+    ax4.scatter(X_2d[ae_anomaly, 0], X_2d[ae_anomaly, 1],
+                s=15, alpha=0.7, color='#E74C3C', marker='x',
+                label=f'Anomaly ({ae_anomaly.sum():,})')
+    ax4.set_xlabel('PC1')
+    ax4.set_ylabel('PC2')
+    ax4.set_title(f'#27 Autoencoder — {ae_anomaly.sum():,} anomalies (MSE > P95)',
+                  fontsize=11, fontweight='bold')
+    ax4.legend(fontsize=8)
+
+    # (5) Reconstruction Error 分佈
+    ax5 = fig.add_subplot(gs[1, 1])
+    ax5.hist(reconstruction_error[~ae_anomaly], bins=60, alpha=0.6,
+             color='#27AE60', density=True, label='Normal')
+    ax5.hist(reconstruction_error[ae_anomaly], bins=30, alpha=0.6,
+             color='#E74C3C', density=True, label='Anomaly')
+    ax5.axvline(threshold_ae, color='red', ls='--', lw=1.5,
+                label=f'Threshold (P95={threshold_ae:.3f})')
+    ax5.set_xlabel('Reconstruction Error (MSE)')
+    ax5.set_ylabel('Density')
+    ax5.set_title('#27 Autoencoder — Reconstruction Error', fontsize=12, fontweight='bold')
+    ax5.legend(fontsize=8)
+
+    # (6) 兩種方法的交叉比較
+    ax6 = fig.add_subplot(gs[1, 2])
+    both = iso_anomaly & ae_anomaly
+    only_iso = iso_anomaly & ~ae_anomaly
+    only_ae = ~iso_anomaly & ae_anomaly
+    neither = ~iso_anomaly & ~ae_anomaly
+
+    venn_data = {
+        'Both Methods': both.sum(),
+        'Only Isolation Forest': only_iso.sum(),
+        'Only Autoencoder': only_ae.sum(),
+        'Normal (Both)': neither.sum(),
+    }
+    colors_v = ['#8B0000', '#E74C3C', '#F39C12', '#27AE60']
+    bars = ax6.barh(list(venn_data.keys()), list(venn_data.values()),
+                    color=colors_v, alpha=0.8, edgecolor='white')
+    for bar, val in zip(bars, venn_data.values()):
+        pct = val / len(X) * 100
+        ax6.text(bar.get_width() + max(venn_data.values()) * 0.02,
+                 bar.get_y() + bar.get_height() / 2,
+                 f'{val:,} ({pct:.1f}%)', va='center', fontsize=9, fontweight='bold')
+    ax6.set_xlabel('Number of SKUs')
+    ax6.set_title('Anomaly Detection Agreement', fontsize=12, fontweight='bold')
+    ax6.invert_yaxis()
+
+    # 底部統計
+    agreement = (iso_anomaly == ae_anomaly).mean() * 100
+    fig.text(0.5, 0.01,
+             f'Agreement between methods: {agreement:.1f}%  |  '
+             f'Isolation Forest: {iso_anomaly.sum():,} anomalies  |  '
+             f'Autoencoder: {ae_anomaly.sum():,} anomalies  |  '
+             f'Both: {both.sum():,} anomalies',
+             ha='center', fontsize=10, color='#1B2A4A',
+             bbox=dict(boxstyle='round,pad=0.5', fc='#FADBD8', ec='#E74C3C'))
+
+    plt.savefig(save_path, dpi=150, facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  ✅ {save_path}')
+
+
+# ================================================================
+# Part 7: 基因演算法 (演算法 #30) — 最佳化安全庫存
+# Genetic Algorithm — Optimize Safety Stock Levels
+# ================================================================
+def run_genetic_algorithm(clean_df, save_path='chart_21_genetic_algorithm.png'):
+    """圖表 21: 基因演算法最佳化"""
+    np.random.seed(42)
+
+    # 目標: 最小化 (缺貨成本 + 持有成本)
+    # 決策變數: 每個品類的安全庫存乘數 (0.5x ~ 3.0x)
+    categories = sorted(clean_df['Category'].unique())
+    n_cats = len(categories)
+
+    # 品類層級統計
+    cat_stats = {}
+    for cat in categories:
+        cdf = clean_df[clean_df['Category'] == cat]
+        cat_stats[cat] = {
+            'demand_mean': cdf['Daily_Demand_Est'].mean(),
+            'cost_mean': cdf['Unit_Cost'].mean(),
+            'safety_mean': cdf['Safety_Stock_Target'].mean(),
+            'lead_mean': cdf['Lead_Time_Days'].mean(),
+            'sku_count': len(cdf),
+        }
+
+    def fitness(chromosome):
+        """評估適應度 (越低越好)"""
+        total_cost = 0
+        for i, cat in enumerate(categories):
+            s = cat_stats[cat]
+            safety_mult = chromosome[i]
+            safety_stock = s['safety_mean'] * safety_mult
+
+            # 持有成本: 安全庫存 × 單位成本 × 年持有率(25%) × SKU數
+            holding = safety_stock * s['cost_mean'] * 0.25 * s['sku_count']
+
+            # 缺貨成本: 如果安全庫存不足以覆蓋 lead time 需求
+            lt_demand = s['demand_mean'] * s['lead_mean']
+            if safety_stock < lt_demand * 0.5:
+                stockout = (lt_demand * 0.5 - safety_stock) * s['cost_mean'] * 2 * s['sku_count']
+            else:
+                stockout = 0
+
+            total_cost += holding + stockout
+        return total_cost
+
+    # GA 參數
+    POP_SIZE = 100
+    N_GEN = 80
+    MUTATION_RATE = 0.15
+    CROSSOVER_RATE = 0.8
+    LOW, HIGH = 0.5, 3.0
+
+    # 初始族群
+    population = np.random.uniform(LOW, HIGH, (POP_SIZE, n_cats))
+    best_fitness_history = []
+    avg_fitness_history = []
+    best_chromosome_history = []
+
+    for gen in range(N_GEN):
+        # 評估適應度
+        fitness_scores = np.array([fitness(ind) for ind in population])
+        best_idx = np.argmin(fitness_scores)
+        best_fitness_history.append(fitness_scores[best_idx])
+        avg_fitness_history.append(fitness_scores.mean())
+        best_chromosome_history.append(population[best_idx].copy())
+
+        # 選擇 (Tournament Selection)
+        new_pop = [population[best_idx].copy()]  # 菁英保留
+        for _ in range(POP_SIZE - 1):
+            i, j = np.random.randint(0, POP_SIZE, 2)
+            winner = population[i] if fitness_scores[i] < fitness_scores[j] else population[j]
+            new_pop.append(winner.copy())
+
+        # 交叉 (Single-point Crossover)
+        for i in range(1, POP_SIZE - 1, 2):
+            if np.random.random() < CROSSOVER_RATE:
+                pt = np.random.randint(1, n_cats)
+                new_pop[i][pt:], new_pop[i + 1][pt:] = \
+                    new_pop[i + 1][pt:].copy(), new_pop[i][pt:].copy()
+
+        # 突變 (Gaussian Mutation)
+        for i in range(1, POP_SIZE):
+            for j in range(n_cats):
+                if np.random.random() < MUTATION_RATE:
+                    new_pop[i][j] += np.random.normal(0, 0.2)
+                    new_pop[i][j] = np.clip(new_pop[i][j], LOW, HIGH)
+
+        population = np.array(new_pop)
+
+    # 最終最佳解
+    final_fitness = np.array([fitness(ind) for ind in population])
+    best_solution = population[np.argmin(final_fitness)]
+
+    # ── 繪圖 ──
+    fig = plt.figure(figsize=(24, 14), facecolor='#F0F2F6')
+    fig.suptitle('#30 Genetic Algorithm — Optimizing Safety Stock Multipliers by Category',
+                 fontsize=18, fontweight='bold', y=0.98, color='#1B2A4A')
+    gs = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.30,
+                  left=0.06, right=0.96, top=0.92, bottom=0.06)
+
+    # (1) 收斂曲線
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax1.plot(best_fitness_history, 'b-', lw=2, label='Best Fitness')
+    ax1.plot(avg_fitness_history, 'r--', lw=1.5, alpha=0.7, label='Avg Fitness')
+    ax1.set_xlabel('Generation')
+    ax1.set_ylabel('Total Cost ($)')
+    ax1.set_title('GA Convergence Curve', fontsize=12, fontweight='bold')
+    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x/1e6:.1f}M'))
+    ax1.legend(fontsize=8)
+    ax1.text(0.97, 0.95,
+             f'Pop={POP_SIZE}\nGen={N_GEN}\nMut={MUTATION_RATE}\nCross={CROSSOVER_RATE}',
+             transform=ax1.transAxes, fontsize=8, va='top', ha='right',
+             family='monospace', bbox=dict(boxstyle='round', fc='white', ec='gray'))
+
+    # (2) 最佳安全庫存乘數
+    ax2 = fig.add_subplot(gs[0, 1])
+    colors_cat = sns.color_palette('Set2', n_cats)
+    bars = ax2.bar(categories, best_solution, color=colors_cat, edgecolor='white')
+    ax2.axhline(1.0, color='red', ls='--', lw=1.5, label='Current (1.0x)')
+    for bar, val in zip(bars, best_solution):
+        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.03,
+                 f'{val:.2f}x', ha='center', fontsize=9, fontweight='bold')
+    ax2.set_ylabel('Safety Stock Multiplier')
+    ax2.set_title('Optimal Safety Stock Multipliers', fontsize=12, fontweight='bold')
+    ax2.legend(fontsize=8)
+    ax2.tick_params(axis='x', rotation=30)
+
+    # (3) 成本節省比較
+    ax3 = fig.add_subplot(gs[0, 2])
+    current_cost = fitness(np.ones(n_cats))  # 現況 1.0x
+    optimal_cost = fitness(best_solution)
+    savings = current_cost - optimal_cost
+
+    ax3.bar(['Current\n(1.0x all)', 'GA Optimized'],
+            [current_cost / 1e6, optimal_cost / 1e6],
+            color=['#E74C3C', '#27AE60'], edgecolor='white', width=0.5)
+    ax3.text(0, current_cost / 1e6 + 0.5, f'${current_cost / 1e6:.1f}M',
+             ha='center', fontsize=11, fontweight='bold')
+    ax3.text(1, optimal_cost / 1e6 + 0.5, f'${optimal_cost / 1e6:.1f}M',
+             ha='center', fontsize=11, fontweight='bold')
+    ax3.set_ylabel('Total Cost ($M)')
+    ax3.set_title(f'Cost Savings: ${savings / 1e6:.1f}M ({savings / current_cost * 100:.1f}%)',
+                  fontsize=12, fontweight='bold', color='#27AE60')
+
+    # (4) 各品類成本分解 (持有 vs 缺貨) — 最佳解
+    ax4 = fig.add_subplot(gs[1, 0])
+    holding_costs = []
+    stockout_costs = []
+    for i, cat in enumerate(categories):
+        s = cat_stats[cat]
+        safety = s['safety_mean'] * best_solution[i]
+        holding = safety * s['cost_mean'] * 0.25 * s['sku_count']
+        lt_demand = s['demand_mean'] * s['lead_mean']
+        stockout = max(0, (lt_demand * 0.5 - safety) * s['cost_mean'] * 2 * s['sku_count'])
+        holding_costs.append(holding / 1e6)
+        stockout_costs.append(stockout / 1e6)
+
+    x_pos = np.arange(n_cats)
+    ax4.bar(x_pos, holding_costs, label='Holding Cost', color='#3498DB', edgecolor='white')
+    ax4.bar(x_pos, stockout_costs, bottom=holding_costs, label='Stockout Cost',
+            color='#E74C3C', edgecolor='white')
+    ax4.set_xticks(x_pos)
+    ax4.set_xticklabels(categories, fontsize=8, rotation=30, ha='right')
+    ax4.set_ylabel('Cost ($M)')
+    ax4.set_title('Cost Breakdown by Category (Optimized)', fontsize=12, fontweight='bold')
+    ax4.legend(fontsize=8)
+
+    # (5) 基因演化過程 — 每個品類的乘數隨代數變化
+    ax5 = fig.add_subplot(gs[1, 1])
+    history_arr = np.array(best_chromosome_history)
+    for i, cat in enumerate(categories):
+        ax5.plot(history_arr[:, i], label=cat, lw=1.5, alpha=0.8)
+    ax5.axhline(1.0, color='gray', ls='--', lw=1)
+    ax5.set_xlabel('Generation')
+    ax5.set_ylabel('Safety Stock Multiplier')
+    ax5.set_title('Gene Evolution Across Generations', fontsize=12, fontweight='bold')
+    ax5.legend(fontsize=7, ncol=2)
+
+    # (6) 建議總結表
+    ax6 = fig.add_subplot(gs[1, 2])
+    ax6.axis('off')
+    table_data = []
+    for i, cat in enumerate(categories):
+        s = cat_stats[cat]
+        curr_ss = s['safety_mean']
+        opt_ss = s['safety_mean'] * best_solution[i]
+        change = (best_solution[i] - 1) * 100
+        arrow = '↑' if change > 0 else '↓'
+        table_data.append([cat, f'{curr_ss:.0f}', f'{opt_ss:.0f}',
+                           f'{arrow} {abs(change):.0f}%', f'{best_solution[i]:.2f}x'])
+
+    table = ax6.table(cellText=table_data,
+                       colLabels=['Category', 'Current SS', 'Optimal SS', 'Change', 'Multiplier'],
+                       loc='center', cellLoc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.6)
+    # 表頭樣式
+    for j in range(5):
+        table[0, j].set_facecolor('#2E86C1')
+        table[0, j].set_text_props(color='white', fontweight='bold')
+    for i in range(1, len(table_data) + 1):
+        for j in range(5):
+            table[i, j].set_facecolor('#EBF5FB' if i % 2 == 0 else 'white')
+
+    ax6.set_title('Safety Stock Optimization Summary', fontsize=12, fontweight='bold', pad=20)
+
+    plt.savefig(save_path, dpi=150, facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  ✅ {save_path}')
+
+
+# ================================================================
+# Part 8: 演算法總覽與適用性分析
+# Algorithm Overview & Suitability Matrix
+# ================================================================
+def plot_algorithm_overview(results, save_path='chart_22_algorithm_overview.png'):
+    """圖表 22: 30 個演算法總覽"""
+    fig = plt.figure(figsize=(24, 16), facecolor='#F0F2F6')
+    fig.suptitle('30 AI Algorithms — Applicability to Supply Chain Inventory Analysis',
+                 fontsize=18, fontweight='bold', y=0.98, color='#1B2A4A')
+    gs = GridSpec(2, 1, figure=fig, height_ratios=[3, 2], hspace=0.30,
+                  left=0.04, right=0.98, top=0.92, bottom=0.04)
+
+    # (1) 適用性矩陣
+    ax1 = fig.add_subplot(gs[0])
+    ax1.axis('off')
+
+    algorithms = [
+        ['#1', 'Linear Regression', 'Supervised', 'Predict Inv. Value', '✅ Applied', 'sklearn'],
+        ['#2', 'Logistic Regression', 'Supervised', 'Classify Stock Status', '✅ Applied', 'sklearn'],
+        ['#3', 'Decision Tree', 'Supervised', 'Classify Stock Status', '✅ Applied', 'sklearn'],
+        ['#4', 'Random Forest', 'Supervised', 'Classify + Feature Imp.', '✅ Applied', 'sklearn'],
+        ['#5', 'SVM', 'Supervised', 'Classify Stock Status', '✅ Applied', 'sklearn'],
+        ['#6', 'k-NN', 'Supervised', 'Classify Stock Status', '✅ Applied', 'sklearn'],
+        ['#7', 'Naive Bayes', 'Supervised', 'Classify Stock Status', '✅ Applied', 'sklearn'],
+        ['#8', 'Gradient Boosting', 'Supervised', 'Classify + Feature Imp.', '✅ Applied', 'sklearn'],
+        ['#9', 'AdaBoost', 'Supervised', 'Classify Stock Status', '✅ Applied', 'sklearn'],
+        ['#10', 'XGBoost', 'Supervised', 'Classify Stock Status', '⚠ Optional', 'xgboost'],
+        ['#11', 'k-Means', 'Unsupervised', 'Product Segmentation', '✅ Applied', 'sklearn'],
+        ['#12', 'Hierarchical', 'Unsupervised', 'Product Hierarchy', '✅ Applied', 'sklearn'],
+        ['#13', 'DBSCAN', 'Unsupervised', 'Outlier Detection', '✅ Applied', 'sklearn'],
+        ['#14', 'PCA', 'Unsupervised', 'Dimensionality Reduction', '✅ Applied', 'sklearn'],
+        ['#15', 't-SNE', 'Unsupervised', 'Visualization', '✅ Applied', 'sklearn'],
+        ['#16', 'Q-Learning', 'RL', 'Inventory Replenishment', '⬜ N/A*', 'gymnasium'],
+        ['#17', 'SARSA', 'RL', 'Order Policy Learning', '⬜ N/A*', 'gymnasium'],
+        ['#18', 'DQN', 'RL', 'Dynamic Reorder Control', '⬜ N/A*', 'stable-baselines3'],
+        ['#19', 'Policy Gradient', 'RL', 'Supply Chain Control', '⬜ N/A*', 'stable-baselines3'],
+        ['#20', 'Actor-Critic', 'RL', 'Multi-objective Opt.', '⬜ N/A*', 'stable-baselines3'],
+        ['#21', 'ANN (MLP)', 'Deep Learning', 'Classify Stock Status', '✅ Applied', 'sklearn'],
+        ['#22', 'CNN', 'Deep Learning', 'Image-based QC', '⬜ N/A**', 'tensorflow'],
+        ['#23', 'RNN', 'Deep Learning', 'Demand Forecasting', '⬜ N/A***', 'tensorflow'],
+        ['#24', 'LSTM', 'Deep Learning', 'Time-series Forecast', '⬜ N/A***', 'tensorflow'],
+        ['#25', 'Transformer', 'Deep Learning', 'Advanced Forecasting', '⬜ N/A***', 'transformers'],
+        ['#26', 'k-Means++', 'Unsupervised', 'Improved Segmentation', '✅ Applied', 'sklearn'],
+        ['#27', 'Autoencoder', 'Deep Learning', 'Anomaly Detection', '✅ Applied', 'sklearn (MLP)'],
+        ['#28', 'Isolation Forest', 'Unsupervised', 'Anomaly Detection', '✅ Applied', 'sklearn'],
+        ['#29', 'MDP', 'RL Framework', 'Decision Framework', '⬜ N/A*', 'custom'],
+        ['#30', 'Genetic Algorithm', 'Optimization', 'Safety Stock Opt.', '✅ Applied', 'custom'],
+    ]
+
+    table = ax1.table(cellText=algorithms,
+                       colLabels=['#', 'Algorithm', 'Category', 'Supply Chain Use', 'Status', 'Library'],
+                       loc='center', cellLoc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.15)
+
+    # 表頭
+    for j in range(6):
+        table[0, j].set_facecolor('#1B2A4A')
+        table[0, j].set_text_props(color='white', fontweight='bold', fontsize=9)
+
+    # 行顏色
+    cat_colors = {
+        'Supervised': '#EBF5FB', 'Unsupervised': '#E8F8F5',
+        'RL': '#FEF9E7', 'RL Framework': '#FEF9E7',
+        'Deep Learning': '#F5EEF8', 'Optimization': '#FDEDEC',
+    }
+    for i in range(1, 31):
+        cat = algorithms[i - 1][2]
+        bg = cat_colors.get(cat, 'white')
+        for j in range(6):
+            table[i, j].set_facecolor(bg)
+        # 已應用的加粗
+        if '✅' in algorithms[i - 1][4]:
+            table[i, 4].set_text_props(color='#27AE60', fontweight='bold')
+        elif '⬜' in algorithms[i - 1][4]:
+            table[i, 4].set_text_props(color='#95A5A6')
+
+    # (2) 底部說明
+    ax2 = fig.add_subplot(gs[1])
+    ax2.axis('off')
+
+    notes = (
+        "Notes on Algorithms NOT Applied:\n\n"
+        "* #16-20, #29 (Reinforcement Learning / MDP): Requires a sequential decision environment\n"
+        "  with state transitions and rewards. The current dataset is a single snapshot, not a\n"
+        "  simulation environment. Would need: multi-period data + reward function + action space.\n\n"
+        "** #22 (CNN): Designed for image/spatial data (e.g., visual quality inspection).\n"
+        "   Not applicable to tabular inventory data.\n\n"
+        "*** #23-25 (RNN/LSTM/Transformer): Designed for sequential/time-series data.\n"
+        "   The current dataset is cross-sectional (single point in time). Would need:\n"
+        "   historical demand time-series data for demand forecasting applications.\n\n"
+        "Summary: 20 out of 30 algorithms applied  |  "
+        "10 require different data types (time-series, images, or simulation environments)"
+    )
+
+    ax2.text(0.05, 0.95, notes, transform=ax2.transAxes, fontsize=10,
+             va='top', family='monospace', color='#1B2A4A',
+             bbox=dict(boxstyle='round,pad=0.8', fc='#FDFEFE', ec='#BDC3C7', alpha=0.9))
+
+    plt.savefig(save_path, dpi=150, facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  ✅ {save_path}')
+
+
+# ================================================================
+# Main
+# ================================================================
+if __name__ == '__main__':
+    print('=' * 60)
+    print('🤖 30 個 AI 演算法 × 供應鏈庫存分析')
+    print('   30 AI Algorithms × Supply Chain Inventory Analysis')
+    print('=' * 60)
+
+    # 載入資料
+    df, clean, X, y_class, y_reg, feature_cols, le_status = \
+        load_and_prepare('Supply_Chain_Inventory_Clean.csv')
+    print(f'\n📋 已載入 {len(df):,} 筆資料 ({len(clean):,} 筆完整)')
+    print(f'   特徵數: {len(feature_cols)}，分類目標: Stock_Status (3 classes)')
+    print(f'   迴歸目標: Inventory_Value\n')
+
+    # Part 1: 監督式分類 (#2-10, #21)
+    print('▶ Part 1: Supervised Classification (Algorithms #2-10, #21)')
+    print('-' * 50)
+    results, trained_models, X_train, X_test, y_train, y_test, scaler = \
+        run_classification(X, y_class, le_status)
+    X_scaled = scaler.transform(X)
+    plot_classification_comparison(results, y_test, le_status)
+
+    # Part 2: 特徵重要性
+    print('\n▶ Part 2: Feature Importance Analysis')
+    print('-' * 50)
+    plot_feature_importance(trained_models, feature_cols, X_scaled, y_class)
+
+    # Part 3: 迴歸分析 (#1)
+    print('\n▶ Part 3: Regression Analysis (Algorithm #1)')
+    print('-' * 50)
+    plot_regression_analysis(X, y_reg, feature_cols)
+
+    # Part 4: 分群分析 (#11-13, #26)
+    print('\n▶ Part 4: Clustering Analysis (Algorithms #11-13, #26)')
+    print('-' * 50)
+    km_labels = plot_clustering_analysis(X, clean, feature_cols)
+
+    # Part 5: 降維可視化 (#14-15)
+    print('\n▶ Part 5: Dimensionality Reduction (Algorithms #14-15)')
+    print('-' * 50)
+    plot_dimensionality_reduction(X, clean, le_status)
+
+    # Part 6: 異常檢測 (#27-28)
+    print('\n▶ Part 6: Anomaly Detection (Algorithms #27-28)')
+    print('-' * 50)
+    plot_anomaly_detection(X, clean, feature_cols)
+
+    # Part 7: 基因演算法 (#30)
+    print('\n▶ Part 7: Genetic Algorithm (Algorithm #30)')
+    print('-' * 50)
+    run_genetic_algorithm(clean)
+
+    # Part 8: 總覽
+    print('\n▶ Part 8: Algorithm Overview')
+    print('-' * 50)
+    plot_algorithm_overview(results)
+
+    print(f'\n{"=" * 60}')
+    print(f'✅ 全部 8 張 AI 演算法分析圖表已產生完成！')
+    print(f'   Charts: chart_15 ~ chart_22')
+    print(f'   Applied: 20 out of 30 algorithms')
+    print(f'{"=" * 60}')

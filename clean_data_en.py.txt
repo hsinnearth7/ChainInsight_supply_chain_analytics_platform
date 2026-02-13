@@ -1,0 +1,196 @@
+import pandas as pd
+import numpy as np
+import re
+
+def clean_supply_chain_data(input_file, output_file):
+    """
+    Complete Supply Chain Inventory Data Cleaning ETL Pipeline
+    
+    Parameters:
+        input_file: Path to the input dirty data CSV file
+        output_file: Path to the output cleaned data CSV file
+    """
+    
+    print("=== Starting Data Cleaning Process ===\n")
+    
+    # ===== EXTRACT =====
+    print("1. Loading data...")
+    df = pd.read_csv(input_file)
+    print(f"   Original data: {len(df)} rows, {len(df.columns)} columns")
+    print(f"   Columns: {list(df.columns)}\n")
+    
+    # ===== TRANSFORM =====
+    print("2. Starting data cleaning...\n")
+    
+    # 2.1 Clean Product_ID - Remove leading/trailing spaces
+    print("   2.1 Cleaning Product_ID (removing spaces)...")
+    before_count = df['Product_ID'].str.len().sum()
+    df['Product_ID'] = df['Product_ID'].str.strip()
+    after_count = df['Product_ID'].str.len().sum()
+    spaces_removed = before_count - after_count
+    print(f"       ✓ Cleaned {len(df)} Product IDs, removed {spaces_removed} extra spaces")
+    
+    # 2.2 Clean Category - Standardize capitalization
+    print("   2.2 Cleaning Category (standardizing format)...")
+    unique_categories_before = df['Category'].nunique()
+    df['Category'] = df['Category'].str.strip().str.capitalize()
+    unique_categories_after = df['Category'].nunique()
+    print(f"       ✓ Category standardization complete: {unique_categories_before} → {unique_categories_after} unique categories")
+    print(f"       ✓ Category list: {', '.join(sorted(df['Category'].unique()))}")
+    
+    # 2.3 Clean Unit_Cost_Raw - Convert to numeric
+    print("   2.3 Cleaning Unit_Cost_Raw (extracting numeric values)...")
+    print("       → Parsing various price formats (USD, $, plain numbers, Quote Pending, etc.)...")
+    def clean_cost(value):
+        """Clean cost data and extract numeric value"""
+        if pd.isna(value):
+            return np.nan
+        
+        # Convert to string
+        value_str = str(value).strip()
+        
+        # If it's "Quote Pending" or other non-numeric, return NaN
+        if not any(char.isdigit() for char in value_str):
+            return np.nan
+        
+        # Remove "USD", "$", commas, and spaces, keep only digits and decimal point
+        cleaned = re.sub(r'[^\d.]', '', value_str)
+        
+        try:
+            return float(cleaned)
+        except ValueError:
+            return np.nan
+    
+    df['Unit_Cost'] = df['Unit_Cost_Raw'].apply(clean_cost)
+    invalid_costs = df['Unit_Cost'].isna().sum()
+    valid_costs = len(df) - invalid_costs
+    print(f"       ✓ Successfully converted {valid_costs} prices, {invalid_costs} invalid prices will be filled")
+    
+    # 2.4 Clean Current_Stock_Raw - Handle negative numbers and nulls
+    print("   2.4 Cleaning Current_Stock_Raw (handling anomalies)...")
+    df['Current_Stock'] = pd.to_numeric(df['Current_Stock_Raw'], errors='coerce')
+    
+    # Set negative inventory to 0 (negative inventory is unreasonable)
+    negative_stock_count = (df['Current_Stock'] < 0).sum()
+    df.loc[df['Current_Stock'] < 0, 'Current_Stock'] = 0
+    print(f"       ✓ Found and corrected {negative_stock_count} negative inventory values → set to 0")
+    
+    # 2.5 Handle null values
+    print("   2.5 Handling null values...")
+    
+    # For Current_Stock nulls, use 0 or median
+    # Here we use 0 (indicating out of stock)
+    null_stock_count = df['Current_Stock'].isna().sum()
+    df['Current_Stock'] = df['Current_Stock'].fillna(0)
+    print(f"       ✓ Filled {null_stock_count} null inventory values → set to 0 (out of stock)")
+    
+    # For Unit_Cost nulls, use category-wise median
+    print("       → Filling price nulls with category-wise median...")
+    null_cost_count = df['Unit_Cost'].isna().sum()
+    df['Unit_Cost'] = df.groupby('Category')['Unit_Cost'].transform(
+        lambda x: x.fillna(x.median())
+    )
+    
+    # If an entire category has all nulls, use global median
+    df['Unit_Cost'] = df['Unit_Cost'].fillna(df['Unit_Cost'].median())
+    print(f"       ✓ Filled {null_cost_count} null prices (using category median)")
+    
+    # 2.6 Clean Vendor_Name - Remove spaces
+    print("   2.6 Cleaning Vendor_Name...")
+    unique_vendors = df['Vendor_Name'].nunique()
+    df['Vendor_Name'] = df['Vendor_Name'].str.strip()
+    print(f"       ✓ Cleaning complete, total of {unique_vendors} unique vendors")
+    
+    # 2.7 Data validation
+    print("   2.7 Data validation...")
+    # Ensure all numeric columns are positive
+    df['Daily_Demand_Est'] = df['Daily_Demand_Est'].clip(lower=0)
+    df['Safety_Stock_Target'] = df['Safety_Stock_Target'].clip(lower=0)
+    before_lead_time = (df['Lead_Time_Days'] < 1).sum()
+    df['Lead_Time_Days'] = df['Lead_Time_Days'].clip(lower=1)  # Lead time at least 1 day
+    print(f"       ✓ Numeric field validation complete")
+    if before_lead_time > 0:
+        print(f"       ✓ Corrected {before_lead_time} invalid lead times → minimum 1 day")
+    
+    # 2.8 Add derived fields (optional)
+    print("   2.8 Adding calculated fields...")
+    # Calculate Reorder Point = Daily Demand × Lead Time + Safety Stock
+    print("       → Calculating Reorder Point...")
+    df['Reorder_Point'] = (df['Daily_Demand_Est'] * df['Lead_Time_Days'] + 
+                           df['Safety_Stock_Target'])
+    
+    # Calculate inventory status
+    print("       → Evaluating inventory status (Out of Stock / Low Stock / Normal Stock)...")
+    df['Stock_Status'] = df.apply(
+        lambda row: 'Out of Stock' if row['Current_Stock'] == 0
+        else 'Low Stock' if row['Current_Stock'] < row['Reorder_Point']
+        else 'Normal Stock',
+        axis=1
+    )
+    
+    # Calculate inventory value
+    print("       → Calculating total inventory value...")
+    df['Inventory_Value'] = df['Current_Stock'] * df['Unit_Cost']
+    
+    # Stock status statistics
+    out_of_stock = (df['Stock_Status'] == 'Out of Stock').sum()
+    low_stock = (df['Stock_Status'] == 'Low Stock').sum()
+    normal_stock = (df['Stock_Status'] == 'Normal Stock').sum()
+    print(f"       ✓ Inventory status summary:")
+    print(f"         - Out of Stock: {out_of_stock} products")
+    print(f"         - Low Stock: {low_stock} products")
+    print(f"         - Normal Stock: {normal_stock} products")
+    
+    # ===== LOAD =====
+    print("\n3. Saving cleaned data...")
+    
+    # Select columns to output (including original and cleaned)
+    output_columns = [
+        'Product_ID', 'Category', 'Unit_Cost', 'Current_Stock',
+        'Daily_Demand_Est', 'Safety_Stock_Target', 'Vendor_Name',
+        'Lead_Time_Days', 'Reorder_Point', 'Stock_Status', 'Inventory_Value'
+    ]
+    
+    print(f"   → Preparing to output {len(output_columns)} columns...")
+    df_clean = df[output_columns]
+    
+    print(f"   → Writing to CSV file: {output_file}")
+    df_clean.to_csv(output_file, index=False)
+    
+    print(f"   ✓ Cleaned data successfully saved to: {output_file}")
+    print(f"   ✓ Cleaned data: {len(df_clean)} rows, {len(df_clean.columns)} columns")
+    
+    # Calculate total inventory value
+    total_value = df_clean['Inventory_Value'].sum()
+    print(f"   ✓ Total inventory value: ${total_value:,.2f}\n")
+    
+    # ===== Data Quality Report =====
+    print("=== Data Cleaning Summary ===")
+    print(f"Total records: {len(df_clean)}")
+    print(f"\nCategory distribution:")
+    print(df_clean['Category'].value_counts())
+    print(f"\nInventory status distribution:")
+    print(df_clean['Stock_Status'].value_counts())
+    print(f"\nUnit cost statistics:")
+    print(df_clean['Unit_Cost'].describe())
+    print(f"\nInventory statistics:")
+    print(df_clean['Current_Stock'].describe())
+    
+    return df_clean
+
+
+if __name__ == "__main__":
+    # Execute cleaning
+    input_file = "Supply_Chain_Inventory_Dirty_10k.csv"
+    output_file = "Supply_Chain_Inventory_Clean.csv"
+    
+    print("=" * 60)
+    print("📊 Supply Chain Inventory Data Cleaning ETL System")
+    print("=" * 60)
+    print()
+    
+    clean_df = clean_supply_chain_data(input_file, output_file)
+    
+    print("=" * 60)
+    print("✅ Data cleaning complete! All steps executed successfully.")
+    print("=" * 60)

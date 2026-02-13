@@ -1,0 +1,644 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from matplotlib.gridspec import GridSpec
+from matplotlib.patches import FancyBboxPatch
+import seaborn as sns
+from scipy import stats
+from scipy.stats import chi2_contingency, f_oneway, kruskal, pearsonr, spearmanr
+import warnings
+warnings.filterwarnings('ignore')
+
+# ============================================================
+# Advanced Supply Chain Statistical Analysis
+# ============================================================
+
+def load_data(csv_path):
+    df = pd.read_csv(csv_path)
+    # Derived columns
+    df['DSI'] = np.where(df['Daily_Demand_Est'] > 0,
+                         df['Current_Stock'] / df['Daily_Demand_Est'], 999)
+    df['Stock_Coverage_Ratio'] = np.where(
+        df['Safety_Stock_Target'] > 0,
+        df['Current_Stock'] / df['Safety_Stock_Target'], 0)
+    df['Demand_Intensity'] = df['Daily_Demand_Est'] * df['Unit_Cost']
+    df['Supply_Risk_Score'] = (
+        df['Lead_Time_Days'] / df['Lead_Time_Days'].max() * 0.4 +
+        (1 - df['Stock_Coverage_Ratio'].clip(0, 3) / 3) * 0.4 +
+        df['Daily_Demand_Est'] / df['Daily_Demand_Est'].max() * 0.2
+    )
+    return df
+
+
+# ================================================================
+# Chart 1: Correlation Heatmap with p-values
+# ================================================================
+def plot_chart1_correlation(df, save_path='chart_01_correlation_matrix.png'):
+    numeric_cols = ['Unit_Cost', 'Current_Stock', 'Daily_Demand_Est',
+                    'Safety_Stock_Target', 'Lead_Time_Days', 'Reorder_Point',
+                    'Inventory_Value', 'DSI', 'Stock_Coverage_Ratio', 'Supply_Risk_Score']
+    labels = ['Unit Cost', 'Stock Qty', 'Daily Demand', 'Safety Stock',
+              'Lead Time', 'Reorder Pt', 'Inv. Value', 'DSI',
+              'Coverage Ratio', 'Risk Score']
+
+    data = df[numeric_cols].replace([np.inf, -np.inf], np.nan).dropna()
+    n = len(numeric_cols)
+
+    # Pearson + Spearman
+    pearson_corr = data.corr(method='pearson')
+    spearman_corr = data.corr(method='spearman')
+
+    # p-value matrix
+    pval_matrix = pd.DataFrame(np.zeros((n, n)), index=numeric_cols, columns=numeric_cols)
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                _, p = pearsonr(data[numeric_cols[i]], data[numeric_cols[j]])
+                pval_matrix.iloc[i, j] = p
+
+    fig, axes = plt.subplots(1, 2, figsize=(22, 9), facecolor='#F0F2F6')
+    fig.suptitle('Correlation Analysis — Pearson vs Spearman',
+                 fontsize=18, fontweight='bold', y=1.0, color='#1B2A4A')
+
+    for idx, (corr, title) in enumerate([
+        (pearson_corr, 'Pearson Correlation (Linear)'),
+        (spearman_corr, 'Spearman Correlation (Monotonic / Rank)')
+    ]):
+        ax = axes[idx]
+        mask = np.triu(np.ones_like(corr, dtype=bool), k=1)
+        sns.heatmap(corr, mask=mask, annot=True, fmt='.2f', cmap='RdBu_r',
+                    center=0, vmin=-1, vmax=1, linewidths=0.5,
+                    xticklabels=labels, yticklabels=labels,
+                    ax=ax, cbar_kws={'shrink': 0.8})
+
+        # Mark non-significant cells (p > 0.05)
+        if idx == 0:
+            for i in range(n):
+                for j in range(i):
+                    if pval_matrix.iloc[i, j] > 0.05:
+                        ax.text(j + 0.5, i + 0.5, 'ns', ha='center', va='bottom',
+                                fontsize=6, color='gray')
+        ax.set_title(title, fontsize=13, fontweight='bold', pad=10)
+        ax.tick_params(labelsize=8)
+
+    fig.text(0.5, -0.02, 'ns = not significant (p > 0.05). Strong pairs: Stock×Inv.Value, Demand×Reorder, Stock×Coverage.',
+             ha='center', fontsize=9, color='#7F8C8D')
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  {save_path}')
+
+
+# ================================================================
+# Chart 2: Distribution Analysis (Histogram + KDE + QQ Plot)
+# ================================================================
+def plot_chart2_distributions(df, save_path='chart_02_distribution_analysis.png'):
+    metrics = [
+        ('Unit_Cost', 'Unit Cost ($)', '#2E86C1'),
+        ('Current_Stock', 'Current Stock (units)', '#27AE60'),
+        ('Daily_Demand_Est', 'Daily Demand Est.', '#E74C3C'),
+        ('Lead_Time_Days', 'Lead Time (days)', '#8E44AD'),
+        ('Inventory_Value', 'Inventory Value ($)', '#F39C12'),
+        ('DSI', 'Days Sales of Inventory', '#1ABC9C'),
+    ]
+
+    fig, axes = plt.subplots(3, 4, figsize=(24, 15), facecolor='#F0F2F6')
+    fig.suptitle('Distribution Analysis — Histograms, KDE & Q-Q Plots',
+                 fontsize=18, fontweight='bold', y=1.0, color='#1B2A4A')
+
+    for i, (col, label, color) in enumerate(metrics):
+        row = i // 2
+        col_idx = (i % 2) * 2
+
+        data = df[col].replace([np.inf, -np.inf], np.nan).dropna()
+        if col == 'DSI':
+            data = data[data < 999]
+
+        # Histogram + KDE
+        ax_hist = axes[row, col_idx]
+        ax_hist.hist(data, bins=50, density=True, alpha=0.6, color=color, edgecolor='white')
+        kde_x = np.linspace(data.min(), data.max(), 300)
+        kde = stats.gaussian_kde(data)
+        ax_hist.plot(kde_x, kde(kde_x), color='#1B2A4A', lw=2)
+        ax_hist.set_title(f'{label}', fontsize=11, fontweight='bold')
+        ax_hist.set_ylabel('Density')
+
+        # Statistical summary text box
+        skew = data.skew()
+        kurt = data.kurtosis()
+        _, shapiro_p = stats.shapiro(data.sample(min(500, len(data)), random_state=42))
+        stat_text = (f'n={len(data):,}\n'
+                     f'mean={data.mean():.1f}\n'
+                     f'std={data.std():.1f}\n'
+                     f'skew={skew:.2f}\n'
+                     f'kurt={kurt:.2f}\n'
+                     f'Shapiro p={shapiro_p:.4f}')
+        ax_hist.text(0.97, 0.95, stat_text, transform=ax_hist.transAxes,
+                     fontsize=7, verticalalignment='top', horizontalalignment='right',
+                     bbox=dict(boxstyle='round,pad=0.4', fc='white', ec=color, alpha=0.85),
+                     family='monospace')
+
+        # Q-Q Plot
+        ax_qq = axes[row, col_idx + 1]
+        osm, osr = stats.probplot(data, dist='norm')[:2]
+        ax_qq.scatter(osm[0], osm[1], s=3, alpha=0.4, color=color)
+        ax_qq.plot(osm[0], osr[0] * osm[0] + osr[1], 'r-', lw=1.5)
+        ax_qq.set_title(f'Q-Q Plot: {label}', fontsize=10)
+        ax_qq.set_xlabel('Theoretical Quantiles')
+        ax_qq.set_ylabel('Sample Quantiles')
+
+        # Normality conclusion
+        normality = 'Normal' if shapiro_p > 0.05 else 'Non-Normal'
+        norm_color = '#27AE60' if shapiro_p > 0.05 else '#E74C3C'
+        ax_qq.text(0.05, 0.92, normality, transform=ax_qq.transAxes,
+                   fontsize=9, fontweight='bold', color=norm_color,
+                   bbox=dict(boxstyle='round', fc='white', ec=norm_color))
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  {save_path}')
+
+
+# ================================================================
+# Chart 3: Vendor Performance Box Plots with Statistical Tests
+# ================================================================
+def plot_chart3_vendor_analysis(df, save_path='chart_03_vendor_performance.png'):
+    metrics = [
+        ('Unit_Cost', 'Unit Cost ($)'),
+        ('Current_Stock', 'Stock Quantity'),
+        ('Lead_Time_Days', 'Lead Time (days)'),
+        ('Inventory_Value', 'Inventory Value ($)'),
+        ('DSI', 'DSI (days)'),
+        ('Supply_Risk_Score', 'Supply Risk Score'),
+    ]
+
+    fig, axes = plt.subplots(2, 3, figsize=(24, 14), facecolor='#F0F2F6')
+    fig.suptitle('Vendor Performance Comparison — Box Plots with Statistical Tests',
+                 fontsize=18, fontweight='bold', y=1.0, color='#1B2A4A')
+
+    vendor_order = df.groupby('Vendor_Name')['Inventory_Value'].sum().sort_values(ascending=False).index
+
+    palette = sns.color_palette('Set2', n_colors=len(vendor_order))
+
+    for idx, (col, label) in enumerate(metrics):
+        ax = axes[idx // 3, idx % 3]
+        plot_data = df.copy()
+        if col == 'DSI':
+            plot_data = plot_data[plot_data['DSI'] < 999]
+
+        sns.boxplot(data=plot_data, x='Vendor_Name', y=col, order=vendor_order,
+                    palette=palette, ax=ax, fliersize=2, linewidth=0.8)
+        ax.set_xticklabels([v.replace(' ', '\n') for v in vendor_order], fontsize=7)
+        ax.set_xlabel('')
+        ax.set_ylabel(label, fontsize=9)
+
+        # ANOVA or Kruskal-Wallis
+        groups = [g[col].dropna().values for _, g in plot_data.groupby('Vendor_Name')]
+        if col == 'DSI':
+            groups = [g[g < 999] for g in groups]
+
+        try:
+            # Kruskal-Wallis (non-parametric, no normality assumption)
+            h_stat, kw_p = kruskal(*groups)
+            # One-way ANOVA (parametric)
+            f_stat, anova_p = f_oneway(*groups)
+            test_text = (f'ANOVA: F={f_stat:.1f}, p={anova_p:.2e}\n'
+                         f'Kruskal: H={h_stat:.1f}, p={kw_p:.2e}')
+            sig_color = '#E74C3C' if kw_p < 0.05 else '#27AE60'
+        except Exception:
+            test_text = 'Test N/A'
+            sig_color = '#95A5A6'
+
+        ax.text(0.02, 0.97, test_text, transform=ax.transAxes,
+                fontsize=7, va='top', family='monospace',
+                bbox=dict(boxstyle='round,pad=0.3', fc='white', ec=sig_color, alpha=0.9))
+
+        if col == 'Inventory_Value':
+            ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  {save_path}')
+
+
+# ================================================================
+# Chart 4: Category x Vendor Cross-Tabulation Heatmaps
+# ================================================================
+def plot_chart4_cross_analysis(df, save_path='chart_04_category_vendor_heatmap.png'):
+    fig, axes = plt.subplots(2, 2, figsize=(22, 16), facecolor='#F0F2F6')
+    fig.suptitle('Category x Vendor Cross Analysis — Heatmaps with Chi-Square Test',
+                 fontsize=18, fontweight='bold', y=1.0, color='#1B2A4A')
+
+    analyses = [
+        ('Inventory_Value', 'sum', 'Total Inventory Value ($)', 'YlOrRd', '${x:,.0f}'),
+        ('Current_Stock', 'mean', 'Avg Stock Quantity', 'Blues', '{x:,.0f}'),
+        ('Lead_Time_Days', 'mean', 'Avg Lead Time (days)', 'Purples', '{x:.1f}'),
+        ('Supply_Risk_Score', 'mean', 'Avg Supply Risk Score', 'RdYlGn_r', '{x:.3f}'),
+    ]
+
+    for idx, (col, agg, title, cmap, fmt) in enumerate(analyses):
+        ax = axes[idx // 2, idx % 2]
+        pivot = df.pivot_table(values=col, index='Category', columns='Vendor_Name',
+                               aggfunc=agg, fill_value=0)
+
+        # Sort
+        pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+        pivot = pivot[pivot.sum().sort_values(ascending=False).index]
+
+        # Annotation format
+        if 'Value' in title or 'Stock' in title:
+            annot_fmt = '.0f'
+        else:
+            annot_fmt = '.2f'
+
+        sns.heatmap(pivot, annot=True, fmt=annot_fmt, cmap=cmap, linewidths=0.5,
+                    ax=ax, cbar_kws={'shrink': 0.7})
+        ax.set_title(title, fontsize=13, fontweight='bold', pad=10)
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+        ax.tick_params(labelsize=8)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha='right')
+
+    # Chi-Square test: Category vs Stock_Status independence
+    ct = pd.crosstab(df['Category'], df['Stock_Status'])
+    chi2, chi_p, dof, expected = chi2_contingency(ct)
+    fig.text(0.5, -0.01,
+             f'Chi-Square Test (Category x Stock Status): chi2={chi2:.1f}, df={dof}, '
+             f'p={chi_p:.2e} -> {"Significant (Not Independent)" if chi_p < 0.05 else "Not Significant (Independent)"}',
+             ha='center', fontsize=10, color='#1B2A4A',
+             bbox=dict(boxstyle='round,pad=0.5', fc='#EBF5FB', ec='#2E86C1'))
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  {save_path}')
+
+
+# ================================================================
+# Chart 5: Regression Analysis
+# ================================================================
+def plot_chart5_regression(df, save_path='chart_05_regression_analysis.png'):
+    fig, axes = plt.subplots(2, 2, figsize=(20, 16), facecolor='#F0F2F6')
+    fig.suptitle('Regression & Relationship Analysis',
+                 fontsize=18, fontweight='bold', y=1.0, color='#1B2A4A')
+
+    pairs = [
+        ('Daily_Demand_Est', 'Current_Stock', 'Daily Demand', 'Current Stock', '#2E86C1'),
+        ('Lead_Time_Days', 'Supply_Risk_Score', 'Lead Time (days)', 'Supply Risk Score', '#E74C3C'),
+        ('Unit_Cost', 'Inventory_Value', 'Unit Cost ($)', 'Inventory Value ($)', '#8E44AD'),
+        ('Safety_Stock_Target', 'Current_Stock', 'Safety Stock Target', 'Current Stock', '#27AE60'),
+    ]
+
+    for idx, (xcol, ycol, xlabel, ylabel, color) in enumerate(pairs):
+        ax = axes[idx // 2, idx % 2]
+
+        x = df[xcol].replace([np.inf, -np.inf], np.nan).dropna()
+        y = df.loc[x.index, ycol].replace([np.inf, -np.inf], np.nan)
+        valid = x.notna() & y.notna()
+        if ycol == 'DSI':
+            valid = valid & (y < 999)
+        x, y = x[valid].values, y[valid].values
+
+        # Scatter plot (sampled to avoid over-plotting)
+        sample_idx = np.random.RandomState(42).choice(len(x), min(3000, len(x)), replace=False)
+        ax.scatter(x[sample_idx], y[sample_idx], s=8, alpha=0.3, color=color, edgecolors='none')
+
+        # OLS regression line
+        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        x_fit = np.linspace(x.min(), x.max(), 100)
+        y_fit = slope * x_fit + intercept
+        ax.plot(x_fit, y_fit, 'r-', lw=2, label='OLS Fit')
+
+        # 95% confidence interval
+        n = len(x)
+        x_mean = x.mean()
+        se = std_err * np.sqrt(1/n + (x_fit - x_mean)**2 / np.sum((x - x_mean)**2))
+        t_crit = stats.t.ppf(0.975, n - 2)
+        ax.fill_between(x_fit, y_fit - t_crit * se, y_fit + t_crit * se,
+                         alpha=0.15, color='red', label='95% CI')
+
+        # Pearson & Spearman
+        r_pearson, p_pearson = pearsonr(x, y)
+        r_spearman, p_spearman = spearmanr(x, y)
+
+        stat_text = (f'OLS: y = {slope:.2f}x + {intercept:.1f}\n'
+                     f'R2 = {r_value**2:.4f}\n'
+                     f'Pearson r = {r_pearson:.3f} (p={p_pearson:.2e})\n'
+                     f'Spearman rho = {r_spearman:.3f} (p={p_spearman:.2e})\n'
+                     f'n = {n:,}')
+        ax.text(0.03, 0.97, stat_text, transform=ax.transAxes,
+                fontsize=8, va='top', family='monospace',
+                bbox=dict(boxstyle='round,pad=0.4', fc='white', ec=color, alpha=0.9))
+
+        ax.set_xlabel(xlabel, fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(f'{xlabel} vs {ylabel}', fontsize=12, fontweight='bold')
+        ax.legend(fontsize=8, loc='lower right')
+
+        if 'Value' in ylabel:
+            ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'${v:,.0f}'))
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  {save_path}')
+
+
+# ================================================================
+# Chart 6: Category Risk Profile
+# ================================================================
+def plot_chart6_category_risk(df, save_path='chart_06_category_risk_profile.png'):
+    fig = plt.figure(figsize=(22, 14), facecolor='#F0F2F6')
+    fig.suptitle('Category Risk Profile — Stock Status, Coverage & Risk Distribution',
+                 fontsize=18, fontweight='bold', y=1.0, color='#1B2A4A')
+
+    gs = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3,
+                  left=0.06, right=0.96, top=0.92, bottom=0.06)
+
+    cat_order = df.groupby('Category')['Inventory_Value'].sum().sort_values(ascending=False).index
+
+    # (1) Stacked percentage bar chart — Stock Status by Category
+    ax1 = fig.add_subplot(gs[0, 0])
+    ct = pd.crosstab(df['Category'], df['Stock_Status'], normalize='index') * 100
+    ct = ct.loc[cat_order, ['Normal Stock', 'Low Stock', 'Out of Stock']]
+    colors_status = {'Normal Stock': '#27AE60', 'Low Stock': '#F39C12', 'Out of Stock': '#E74C3C'}
+    ct.plot(kind='barh', stacked=True, ax=ax1,
+            color=[colors_status[c] for c in ct.columns], edgecolor='white', linewidth=0.5)
+    ax1.set_xlabel('% of SKUs')
+    ax1.set_title('Stock Status by Category', fontsize=12, fontweight='bold')
+    ax1.legend(fontsize=7, loc='lower right')
+    ax1.invert_yaxis()
+    for spine in ax1.spines.values():
+        spine.set_visible(False)
+
+    # (2) Violin plot — Coverage Ratio by Category
+    ax2 = fig.add_subplot(gs[0, 1])
+    plot_df = df[df['Stock_Coverage_Ratio'] < 10].copy()  # Filter extreme values
+    sns.violinplot(data=plot_df, y='Category', x='Stock_Coverage_Ratio',
+                   order=cat_order, palette='Set2', ax=ax2, inner='quartile',
+                   density_norm='width', cut=0)
+    ax2.axvline(1.0, color='#E74C3C', ls='--', lw=1.5, label='Safety Stock = 1x')
+    ax2.set_xlabel('Stock Coverage Ratio (Current / Safety)')
+    ax2.set_title('Safety Stock Coverage by Category', fontsize=12, fontweight='bold')
+    ax2.legend(fontsize=8)
+
+    # (3) Risk Score density plot by Category
+    ax3 = fig.add_subplot(gs[0, 2])
+    palette_cat = sns.color_palette('tab10', n_colors=len(cat_order))
+    for i, cat in enumerate(cat_order):
+        subset = df[df['Category'] == cat]['Supply_Risk_Score'].dropna()
+        subset.plot(kind='kde', ax=ax3, label=cat, color=palette_cat[i], lw=1.5)
+    ax3.set_xlabel('Supply Risk Score')
+    ax3.set_title('Risk Score Distribution by Category', fontsize=12, fontweight='bold')
+    ax3.legend(fontsize=7, loc='upper right')
+
+    # (4) Lead Time distribution by Category (box + scatter)
+    ax4 = fig.add_subplot(gs[1, 0])
+    sns.boxplot(data=df, y='Category', x='Lead_Time_Days', order=cat_order,
+                palette='Set2', ax=ax4, fliersize=2, linewidth=0.8)
+    ax4.set_xlabel('Lead Time (days)')
+    ax4.set_title('Lead Time Distribution by Category', fontsize=12, fontweight='bold')
+
+    # Kruskal-Wallis test
+    groups = [g['Lead_Time_Days'].dropna().values for _, g in df.groupby('Category')]
+    h_stat, kw_p = kruskal(*groups)
+    ax4.text(0.97, 0.05, f'Kruskal-Wallis\nH={h_stat:.1f}, p={kw_p:.2e}',
+             transform=ax4.transAxes, fontsize=8, ha='right', va='bottom',
+             family='monospace',
+             bbox=dict(boxstyle='round', fc='white', ec='#8E44AD', alpha=0.9))
+
+    # (5) OOS Rate vs Avg Lead Time (bubble chart)
+    ax5 = fig.add_subplot(gs[1, 1])
+    cat_stats = df.groupby('Category').agg(
+        oos_rate=('Stock_Status', lambda x: (x == 'Out of Stock').mean() * 100),
+        avg_lead=('Lead_Time_Days', 'mean'),
+        total_value=('Inventory_Value', 'sum'),
+        sku_count=('Product_ID', 'count')
+    ).loc[cat_order]
+
+    scatter = ax5.scatter(cat_stats['avg_lead'], cat_stats['oos_rate'],
+                          s=cat_stats['total_value'] / cat_stats['total_value'].max() * 800,
+                          c=range(len(cat_stats)), cmap='Set2',
+                          edgecolors='#1B2A4A', linewidth=1.5, alpha=0.8, zorder=5)
+    for i, cat in enumerate(cat_stats.index):
+        ax5.annotate(cat, (cat_stats['avg_lead'].iloc[i], cat_stats['oos_rate'].iloc[i]),
+                     fontsize=8, fontweight='bold', ha='center', va='bottom',
+                     xytext=(0, 8), textcoords='offset points')
+
+    # Regression line
+    x_b, y_b = cat_stats['avg_lead'].values, cat_stats['oos_rate'].values
+    slope, intercept, r, p, _ = stats.linregress(x_b, y_b)
+    x_line = np.linspace(x_b.min() - 0.5, x_b.max() + 0.5, 50)
+    ax5.plot(x_line, slope * x_line + intercept, 'r--', lw=1.5, alpha=0.7)
+    ax5.text(0.03, 0.97, f'r={r:.3f}, p={p:.3f}', transform=ax5.transAxes,
+             fontsize=8, va='top', family='monospace',
+             bbox=dict(boxstyle='round', fc='white', ec='#E74C3C'))
+
+    ax5.set_xlabel('Avg Lead Time (days)')
+    ax5.set_ylabel('Out of Stock Rate (%)')
+    ax5.set_title('OOS Rate vs Lead Time (bubble = Inv. Value)', fontsize=12, fontweight='bold')
+
+    # (6) Vendor x Stock Status stacked
+    ax6 = fig.add_subplot(gs[1, 2])
+    vendor_order = df.groupby('Vendor_Name')['Inventory_Value'].sum().sort_values(ascending=False).index
+    ct_v = pd.crosstab(df['Vendor_Name'], df['Stock_Status'], normalize='index') * 100
+    ct_v = ct_v.loc[vendor_order, ['Normal Stock', 'Low Stock', 'Out of Stock']]
+    ct_v.plot(kind='barh', stacked=True, ax=ax6,
+              color=[colors_status[c] for c in ct_v.columns], edgecolor='white', linewidth=0.5)
+    ax6.set_xlabel('% of SKUs')
+    ax6.set_title('Stock Status by Vendor', fontsize=12, fontweight='bold')
+    ax6.legend(fontsize=7, loc='lower right')
+    ax6.invert_yaxis()
+    for spine in ax6.spines.values():
+        spine.set_visible(False)
+
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  {save_path}')
+
+
+# ================================================================
+# Chart 7: Outlier Detection (Z-score + IQR) & Risk Quadrant
+# ================================================================
+def plot_chart7_outlier_risk(df, save_path='chart_07_outlier_risk_analysis.png'):
+    fig = plt.figure(figsize=(20, 16), facecolor='#F0F2F6', constrained_layout=False)
+    fig.suptitle('Outlier Detection & Risk Segmentation',
+                 fontsize=18, fontweight='bold', y=0.97, color='#1B2A4A')
+
+    gs = GridSpec(2, 2, figure=fig, hspace=0.30, wspace=0.25,
+                  left=0.07, right=0.95, top=0.92, bottom=0.06)
+
+    # (1) Z-Score Outlier Detection — Inventory Value
+    ax1 = fig.add_subplot(gs[0, 0])
+    inv_values = df['Inventory_Value'].dropna()
+    z_scores = np.abs(stats.zscore(inv_values))
+    threshold = 3
+    normal_mask = z_scores < threshold
+    outlier_mask = z_scores >= threshold
+
+    ax1.scatter(range(normal_mask.sum()), inv_values[normal_mask].sort_values().values,
+                s=3, alpha=0.3, color='#3498DB', label=f'Normal ({normal_mask.sum():,})')
+    ax1.scatter(range(normal_mask.sum(), normal_mask.sum() + outlier_mask.sum()),
+                inv_values[outlier_mask].sort_values().values,
+                s=15, alpha=0.8, color='#E74C3C', label=f'Outlier |z|>=3 ({outlier_mask.sum():,})')
+    ax1.axhline(inv_values.mean() + threshold * inv_values.std(), color='red', ls='--', lw=1)
+    ax1.set_ylabel('Inventory Value ($)')
+    ax1.set_title('Z-Score Outlier Detection — Inventory Value', fontsize=12, fontweight='bold')
+    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+    ax1.legend(fontsize=9)
+
+    # (2) IQR Outliers — Multi-variable by Category
+    ax2 = fig.add_subplot(gs[0, 1])
+
+    check_cols = ['Inventory_Value', 'Current_Stock', 'Daily_Demand_Est', 'Unit_Cost']
+    cat_outliers = {}
+    for cat in df['Category'].unique():
+        total_out = 0
+        for col in check_cols:
+            subset = df[df['Category'] == cat][col].dropna()
+            q1, q3 = subset.quantile(0.25), subset.quantile(0.75)
+            iqr = q3 - q1
+            if iqr > 0:
+                total_out += ((subset < q1 - 1.5 * iqr) | (subset > q3 + 1.5 * iqr)).sum()
+        cat_outliers[cat] = total_out
+
+    cats = sorted(cat_outliers, key=cat_outliers.get, reverse=True)
+    counts = [cat_outliers[c] for c in cats]
+    palette_iqr = sns.color_palette('Reds_r', n_colors=len(cats))
+    bars = ax2.barh(cats, counts, color=palette_iqr, edgecolor='white', alpha=0.9)
+    for bar, c in zip(bars, counts):
+        ax2.text(bar.get_width() + max(counts)*0.02, bar.get_y() + bar.get_height()/2,
+                 str(c), va='center', fontsize=9, fontweight='bold')
+    ax2.set_xlabel('Total Outliers across 4 metrics (IQR Method)')
+    ax2.set_title('Outlier Count by Category (IQR)', fontsize=12, fontweight='bold')
+    ax2.invert_yaxis()
+    ax2.text(0.97, 0.03, 'Metrics: Inv.Value, Stock,\nDemand, Unit Cost',
+             transform=ax2.transAxes, fontsize=7, ha='right', va='bottom',
+             color='#7F8C8D', style='italic')
+
+    # (3) Risk Quadrant — Demand Intensity vs Stock Coverage
+    ax3 = fig.add_subplot(gs[1, 0])
+    plot_df = df[(df['Stock_Coverage_Ratio'] < 10) & (df['Demand_Intensity'] > 0)].copy()
+    sample = plot_df.sample(min(3000, len(plot_df)), random_state=42)
+
+    status_colors = {'Normal Stock': '#27AE60', 'Low Stock': '#F39C12', 'Out of Stock': '#E74C3C'}
+    for status, color in status_colors.items():
+        sub = sample[sample['Stock_Status'] == status]
+        ax3.scatter(sub['Demand_Intensity'], sub['Stock_Coverage_Ratio'],
+                    s=12, alpha=0.4, color=color, label=status, edgecolors='none')
+
+    # Quadrant lines
+    di_med = plot_df['Demand_Intensity'].median()
+    sc_med = 1.0  # Safety stock 1x as baseline
+    ax3.axvline(di_med, color='gray', ls='--', lw=1, alpha=0.5)
+    ax3.axhline(sc_med, color='gray', ls='--', lw=1, alpha=0.5)
+
+    ax3.text(0.02, 0.98, 'Low Risk\n(Low Demand, Covered)',
+             transform=ax3.transAxes, fontsize=8, va='top', color='#27AE60', fontweight='bold')
+    ax3.text(0.98, 0.98, 'Overstock Risk\n(High Demand, Over-covered)',
+             transform=ax3.transAxes, fontsize=8, va='top', ha='right', color='#3498DB', fontweight='bold')
+    ax3.text(0.02, 0.02, 'Critical Risk\n(Low Demand, Under-covered)',
+             transform=ax3.transAxes, fontsize=8, va='bottom', color='#F39C12', fontweight='bold')
+    ax3.text(0.98, 0.02, 'Urgent Alert\n(High Demand, Under-covered)',
+             transform=ax3.transAxes, fontsize=8, va='bottom', ha='right', color='#E74C3C', fontweight='bold')
+
+    ax3.set_xlabel('Demand Intensity (Daily Demand x Unit Cost)')
+    ax3.set_ylabel('Stock Coverage Ratio (Stock / Safety Stock)')
+    ax3.set_title('Risk Quadrant: Demand Intensity vs Coverage', fontsize=12, fontweight='bold')
+    ax3.legend(fontsize=8, loc='center right')
+
+    # (4) Risk Level Statistics
+    ax4 = fig.add_subplot(gs[1, 1])
+    df_risk = df.copy()
+    df_risk['Risk_Level'] = pd.cut(
+        df_risk['Supply_Risk_Score'],
+        bins=[0, 0.3, 0.5, 0.7, 1.0],
+        labels=['Low', 'Medium', 'High', 'Critical']
+    )
+    risk_cat = pd.crosstab(df_risk['Risk_Level'], df_risk['Category'])
+
+    risk_cat.plot(kind='bar', stacked=True, ax=ax4, colormap='Set2',
+                  edgecolor='white', linewidth=0.5)
+    ax4.set_xlabel('Risk Level')
+    ax4.set_ylabel('Number of SKUs')
+    ax4.set_title('Risk Level Distribution by Category', fontsize=12, fontweight='bold')
+    ax4.legend(fontsize=7, loc='upper left', title='Category')
+    ax4.tick_params(axis='x', rotation=0)
+
+    # Summary statistics
+    risk_summary = df_risk['Risk_Level'].value_counts().sort_index()
+    summary_parts = [f'{level}: {count:,} ({count/len(df)*100:.1f}%)'
+                     for level, count in risk_summary.items()]
+    fig.text(0.5, 0.01, '  |  '.join(summary_parts),
+             ha='center', fontsize=10, color='#1B2A4A',
+             bbox=dict(boxstyle='round,pad=0.5', fc='#EBF5FB', ec='#2E86C1'))
+
+    plt.savefig(save_path, dpi=150, facecolor=fig.get_facecolor())
+    plt.close()
+    print(f'  {save_path}')
+
+
+# ================================================================
+# Chart 8: Key Variable Pair Plot with regression coefficients
+# ================================================================
+def plot_chart8_pairplot(df, save_path='chart_08_pairplot_regression.png'):
+    cols = ['Unit_Cost', 'Current_Stock', 'Daily_Demand_Est', 'Lead_Time_Days', 'Inventory_Value']
+    labels = {'Unit_Cost': 'Unit Cost', 'Current_Stock': 'Stock',
+              'Daily_Demand_Est': 'Demand', 'Lead_Time_Days': 'Lead Time',
+              'Inventory_Value': 'Inv. Value'}
+
+    sample = df[cols + ['Stock_Status']].dropna().sample(min(2000, len(df)), random_state=42)
+
+    palette = {'Normal Stock': '#27AE60', 'Low Stock': '#F39C12', 'Out of Stock': '#E74C3C'}
+
+    g = sns.pairplot(sample, hue='Stock_Status', palette=palette,
+                     plot_kws={'s': 8, 'alpha': 0.4, 'edgecolor': 'none'},
+                     diag_kws={'alpha': 0.5},
+                     height=2.5)
+
+    g.figure.suptitle('Pair Plot — Key Variables by Stock Status',
+                      fontsize=16, fontweight='bold', y=1.02, color='#1B2A4A')
+    g.figure.set_facecolor('#F0F2F6')
+
+    # Update axis labels
+    for ax_row in g.axes:
+        for ax in ax_row:
+            xlabel = ax.get_xlabel()
+            ylabel = ax.get_ylabel()
+            if xlabel in labels:
+                ax.set_xlabel(labels[xlabel], fontsize=8)
+            if ylabel in labels:
+                ax.set_ylabel(labels[ylabel], fontsize=8)
+
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=g.figure.get_facecolor())
+    plt.close()
+    print(f'  {save_path}')
+
+
+# ================================================================
+# Main
+# ================================================================
+if __name__ == '__main__':
+    print('=' * 60)
+    print('Advanced Supply Chain Statistical Analysis')
+    print('=' * 60)
+
+    df = load_data('Supply_Chain_Inventory_Clean.csv')
+    print(f'\nLoaded {len(df):,} records. Generating charts...\n')
+
+    plot_chart1_correlation(df)
+    plot_chart2_distributions(df)
+    plot_chart3_vendor_analysis(df)
+    plot_chart4_cross_analysis(df)
+    plot_chart5_regression(df)
+    plot_chart6_category_risk(df)
+    plot_chart7_outlier_risk(df)
+    plot_chart8_pairplot(df)
+
+    print(f'\n{"=" * 60}')
+    print(f'All 8 charts generated successfully!')
+    print(f'{"=" * 60}')
