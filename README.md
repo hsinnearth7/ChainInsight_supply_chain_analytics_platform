@@ -184,8 +184,8 @@ supply-chain-analysis/
 
 ```bash
 # Clone the repository
-git clone https://github.com/hsinnearth7/ChainInsight_supply_chain_analytics_platform.git
-cd ChainInsight_supply_chain_analytics_platform
+git clone https://github.com/hsinnearth7/ChainInsight_Supply_Chain_Intelligence_Platform.git
+cd ChainInsight_Supply_Chain_Intelligence_Platform
 
 # Install dependencies
 pip install -r requirements.txt
